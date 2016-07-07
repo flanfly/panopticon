@@ -21,7 +21,9 @@ use std::fmt::Debug;
 use std::collections::{HashSet,HashMap};
 use std::iter::FromIterator;
 use std::borrow::Cow;
-use std::cmp::max;
+use std::cmp;
+use num::abs;
+use num::integer::{lcm,gcd};
 
 use graph_algos::{
     GraphTrait,
@@ -194,7 +196,7 @@ pub fn approximate<A: Avalue>(func: &Function) -> Result<HashMap<Lvalue,A>> {
                 if let Lvalue::Variable{ ref name, ref size,.. } = i.assignee {
                     let t = *size;
                     let s = *sizes.get(name).unwrap_or(&t);
-                    sizes.insert(name.clone(),max(s,t));
+                    sizes.insert(name.clone(),cmp::max(s,t));
                 }
             });
         }
@@ -631,6 +633,261 @@ impl<A: Avalue> Avalue for Widening<A> {
         Widening{
             value: self.value.extract(size,offset),
             point: self.point.clone(),
+        }
+    }
+}
+
+/// Zhan and Koutsoukos: Generic Value-Set Analysis on Low-Level Code
+#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
+pub enum ExtStridedInterval {
+    Join,
+    Interval{
+        stride: u64,
+        first: u64,
+        last: u64,
+        size: usize,
+    },
+    Meet,
+}
+
+impl ExtStridedInterval {
+    fn dsi(&self) -> Vec<ExtStridedInterval> {
+        match *self {
+            ExtStridedInterval::Meet => vec![],
+            ExtStridedInterval::Interval{ stride, first, last, size } => {
+                let signed_max = (1u64 << cmp::max(size - 1,63)) - 1;
+                let l = if size < 64 { 0xffffffffffffffff % (1 << size) } else { 0xffffffffffffffff };
+                if first > signed_max && last > 0 {
+                    vec![
+                        ExtStridedInterval::Interval{
+                            stride: stride, first: 0, last: last, size: size },
+                        ExtStridedInterval::Interval{
+                            stride: stride, first: first, last: l, size: size }
+                    ]
+                } else {
+                    vec![ExtStridedInterval::Interval{
+                        stride: stride, first: first, last: last, size: size }]
+                }
+            },
+            ExtStridedInterval::Join => vec![],
+        }
+    }
+}
+
+impl Avalue for ExtStridedInterval {
+    fn abstract_value(v: &Rvalue) -> Self {
+        if let &Rvalue::Constant{ ref value, ref size } = v {
+            ExtStridedInterval::Interval{ stride: 0, first: *value, last: *value, size: *size }
+        } else {
+            ExtStridedInterval::Join
+        }
+    }
+
+    fn extract(&self,size: usize,offset: usize) -> Self {
+        unimplemented!()
+    }
+
+    fn abstract_constraint(constr: &Constraint) -> Self {
+        unimplemented!()
+    }
+
+    fn execute(_: &ProgramPoint,_: &Operation<Self>) -> Self {
+        unimplemented!()
+    }
+
+    /*
+        match *op {
+            //Operation::And(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::And(a,b))),
+            //Operation::InclusiveOr(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::InclusiveOr(a,b))),
+            //Operation::ExclusiveOr(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ExclusiveOr(a,b))),
+            Operation::Add(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
+                           ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
+                let stride = gcd(a_stride,b_stride);
+                let size = cmp::max(a_size,b_size);
+                let maybe_first = a_first.checked_add(b_first);
+                let maybe_last = a_last.checked_add(b_last);
+
+                match (maybe_first,maybe_last) {
+                    (Some(first),Some(last)) => {
+                        ExtStridedInterval::Interval{
+                            stride: stride,
+                            first: if size < 64 { first % (1 << size) } else { first },
+                            last: if size < 64 { last % (1 << size) } else { last },
+                            size: size,
+                        }
+                    },
+                    _ => {
+                        
+
+                let last = (a_last + b_last) % (1 << size);
+
+                ExtStridedInterval::Interval{
+                    stride: stride,
+                    first: first,
+                    last: last,
+                    size: size,
+                }
+            },
+            Operation::Subtract(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
+                                ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
+                let stride = gcd(a_stride,b_stride);
+                let size = cmp::max(a_size,b_size);
+                let first = (a_first - b_last) % (1 << size);
+                let last = (a_last - b_first) % (1 << size);
+
+                ExtStridedInterval::Interval{
+                    stride: stride,
+                    first: first,
+                    last: last,
+                    size: size,
+                }
+            },
+            //Operation::Multiply(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
+            //Operation::DivideSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
+            //Operation::DivideUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
+            //Operation::Modulo(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Modulo(a,b))),
+            //Operation::ShiftRightSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftRightSigned(a,b))),
+            //Operation::ShiftRightUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftRightUnsigned(a,b))),
+            //Operation::ShiftLeft(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftLeft(a,b))),
+
+            //Operation::LessOrEqualSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualSigned(a,b))),
+            //Operation::LessOrEqualUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualUnsigned(a,b))),
+            //Operation::LessSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessSigned(a,b))),
+            //Operation::LessUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessUnsigned(a,b))),
+            //Operation::Equal(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Equal(a,b))),
+
+            //Operation::Move(ref a) =>
+            //    map(a,&|a| execute(Operation::Move(a))),
+            //Operation::Call(ref a) =>
+            //    map(a,&|a| execute(Operation::Call(a))),
+            //Operation::ZeroExtend(ref sz,ref a) =>
+            //    map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
+            //Operation::SignExtend(ref sz,ref a) =>
+            //    map(a,&|a| execute(Operation::SignExtend(*sz,a))),
+
+            //Operation::Load(ref r,ref a) =>
+            //    map(a,&|a| execute(Operation::Load(r.clone(),a))),
+            //Operation::Store(ref r,ref a) =>
+            //    map(a,&|a| execute(Operation::Store(r.clone(),a))),
+
+            //Operation::Phi(_) => unreachable!(),
+            _ => ExtStridedInterval::Join,
+        }
+    }*/
+
+    fn narrow(&self, a: &Self) -> Self {
+        unimplemented!()
+    }
+
+    fn combine(&self,a: &Self) -> Self {
+        ExtStridedInterval::Join
+    }
+    
+    fn widen(&self,_: &Self) -> Self {
+        ExtStridedInterval::Join
+    }
+
+    fn initial() -> Self {
+        ExtStridedInterval::Meet
+    }
+
+    fn more_exact(&self, a: &Self) -> bool {
+        unimplemented!()
+    }
+}
+
+// Linus Kaellberg: "Circular Linear Progressions in SWEET"
+#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
+pub struct Clp {
+    pub width: usize,
+    pub base: u64,
+    pub stride: u64,
+    pub cardinality: u64,
+}
+
+impl Clp {
+    pub fn is_bottom(&self) -> bool {
+        self.cardinality == 0
+    }
+
+    pub fn is_top(&self) -> bool {
+        (64 - self.cardinality.leading_zeros()) as usize >= self.width &&
+        self.stride & 1 != 0
+    }
+
+    pub fn canonize(a: Clp) -> Clp {
+        let m = 1u64 << cmp::min(a.width,63);
+        match a {
+            Clp{ width, cardinality: 0,.. } =>
+                Clp{
+                    width: width,
+                    base: 0,
+                    stride: 0,
+                    cardinality: 0,
+                },
+            Clp{ width, base, cardinality: 1,.. } =>
+                Clp{
+                    width: width,
+                    base: if width < 64 { base % m } else { base },
+                    stride: 0,
+                    cardinality: 1,
+                },
+            Clp{ width, base, stride, cardinality } => {
+                let k = if stride == 0 { 1 }
+                        else if width < 64 { lcm(m,stride) / stride }
+                        else { stride };
+
+                if cardinality >= k && k >= 2 {
+                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
+                    Clp{
+                        width: width,
+                        base: base % s,
+                        stride: s,
+                        cardinality: k,
+                    }
+                } else if cardinality == k - 1 && cardinality >= 2 {
+                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
+
+                    Clp{
+                        width: width,
+                        base: if width < 64 { (base + (cardinality * stride) + s) % m } else { base },
+                        stride: if width < 64 { gcd(stride,m) % m } else { stride },
+                        cardinality: cardinality,
+                    }
+                } else {
+                    if stride % m < (m >> 1) {
+                        Clp{
+                            width: width,
+                            base: if width < 64 { base % m } else { base },
+                            stride: if width < 64 { stride % m } else { stride },
+                            cardinality: cardinality,
+                        }
+                    } else {
+                        let b = (cardinality - 1) * stride + base;
+                        Clp{
+                            width: width,
+                            base: if width < 64 { b % m } else { b },
+                            stride: if width < 64 { (m - stride) % m } else { stride },
+                            cardinality: cardinality,
+                        }
+                    }
+                }
+            },
         }
     }
 }
@@ -1078,6 +1335,66 @@ mod tests {
 
         for i in vals {
             println!("{:?}",i);
+        }
+    }
+
+    #[test]
+ /*   fn ext_strided_interval() {
+
+        {
+            let a = ExtStridedInterval::Interval{
+                stride: 4, first: 0x7ff0, last: 0x7ffc, size: 16 };
+            let b = ExtStridedInterval::Interval{
+                stride: 0, first: 4, last: 4, size: 16 };
+            let res = ExtStridedInterval::execute(&Operation::Add(a,b));
+            let exp = ExtStridedInterval::Interval{
+                stride: 4, first: 0x7ff4, last: 0x8000, size: 16 };
+
+            assert_eq!(res, exp);
+        }
+
+        {
+            let a = ExtStridedInterval::Interval{
+                stride: 1, first: 10, last: 20, size: 16 };
+            let b = ExtStridedInterval::Interval{
+                stride: 1, first: 0xfffffffffffffffe, last: 2, size: 64 };
+            let exp = vec![
+                ExtStridedInterval::Interval{
+                    stride: 1, first: 0, last: 2, size: 64 },
+                ExtStridedInterval::Interval{
+                    stride: 1, first: 0xfffffffffffffffe, last: 0xffffffffffffffff, size: 64 }
+            ];
+
+            assert_eq!(a.dsi(), vec![a]);
+            assert_eq!(b.dsi(), exp);
+        }
+    }*/
+
+    #[test]
+    fn circular_linear_progression() {
+
+        {
+            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 19 };
+            let c = Clp{ width: 8, base: 8, stride: 16, cardinality: 16 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 19 });
+        }
+
+        {
+            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 15 };
+            let c = Clp{ width: 8, base: 184, stride: 16, cardinality: 15 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 15 });
+        }
+
+        {
+            let a = Clp{ width: 8, base: 90, stride: 132, cardinality: 7 };
+            let c = Clp{ width: 8, base: 114, stride: 124, cardinality: 7 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 90, stride: 132, cardinality: 7 });
         }
     }
 }
