@@ -35,7 +35,9 @@ use std::fmt::Debug;
 use std::collections::{HashSet,HashMap};
 use std::iter::FromIterator;
 use std::borrow::Cow;
-use std::cmp::max;
+use std::cmp;
+use num::abs;
+use num::integer::{lcm,gcd};
 
 use graph_algos::{
     GraphTrait,
@@ -227,7 +229,7 @@ pub fn approximate<A: Avalue>(func: &Function) -> Result<HashMap<Lvalue,A>> {
                 if let Lvalue::Variable{ ref name, ref size,.. } = i.assignee {
                     let t = *size;
                     let s = *sizes.get(name).unwrap_or(&t);
-                    sizes.insert(name.clone(),max(s,t));
+                    sizes.insert(name.clone(),cmp::max(s,t));
                 }
             });
         }
@@ -437,6 +439,261 @@ impl<A: Avalue> Avalue for Widening<A> {
         Widening{
             value: self.value.extract(size,offset),
             point: self.point.clone(),
+        }
+    }
+}
+
+/// Zhan and Koutsoukos: Generic Value-Set Analysis on Low-Level Code
+#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
+pub enum ExtStridedInterval {
+    Join,
+    Interval{
+        stride: u64,
+        first: u64,
+        last: u64,
+        size: usize,
+    },
+    Meet,
+}
+
+impl ExtStridedInterval {
+    fn dsi(&self) -> Vec<ExtStridedInterval> {
+        match *self {
+            ExtStridedInterval::Meet => vec![],
+            ExtStridedInterval::Interval{ stride, first, last, size } => {
+                let signed_max = (1u64 << cmp::max(size - 1,63)) - 1;
+                let l = if size < 64 { 0xffffffffffffffff % (1 << size) } else { 0xffffffffffffffff };
+                if first > signed_max && last > 0 {
+                    vec![
+                        ExtStridedInterval::Interval{
+                            stride: stride, first: 0, last: last, size: size },
+                        ExtStridedInterval::Interval{
+                            stride: stride, first: first, last: l, size: size }
+                    ]
+                } else {
+                    vec![ExtStridedInterval::Interval{
+                        stride: stride, first: first, last: last, size: size }]
+                }
+            },
+            ExtStridedInterval::Join => vec![],
+        }
+    }
+}
+
+impl Avalue for ExtStridedInterval {
+    fn abstract_value(v: &Rvalue) -> Self {
+        if let &Rvalue::Constant{ ref value, ref size } = v {
+            ExtStridedInterval::Interval{ stride: 0, first: *value, last: *value, size: *size }
+        } else {
+            ExtStridedInterval::Join
+        }
+    }
+
+    fn extract(&self,size: usize,offset: usize) -> Self {
+        unimplemented!()
+    }
+
+    fn abstract_constraint(constr: &Constraint) -> Self {
+        unimplemented!()
+    }
+
+    fn execute(_: &ProgramPoint,_: &Operation<Self>) -> Self {
+        unimplemented!()
+    }
+
+    /*
+        match *op {
+            //Operation::And(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::And(a,b))),
+            //Operation::InclusiveOr(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::InclusiveOr(a,b))),
+            //Operation::ExclusiveOr(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ExclusiveOr(a,b))),
+            Operation::Add(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
+                           ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
+                let stride = gcd(a_stride,b_stride);
+                let size = cmp::max(a_size,b_size);
+                let maybe_first = a_first.checked_add(b_first);
+                let maybe_last = a_last.checked_add(b_last);
+
+                match (maybe_first,maybe_last) {
+                    (Some(first),Some(last)) => {
+                        ExtStridedInterval::Interval{
+                            stride: stride,
+                            first: if size < 64 { first % (1 << size) } else { first },
+                            last: if size < 64 { last % (1 << size) } else { last },
+                            size: size,
+                        }
+                    },
+                    _ => {
+                        
+
+                let last = (a_last + b_last) % (1 << size);
+
+                ExtStridedInterval::Interval{
+                    stride: stride,
+                    first: first,
+                    last: last,
+                    size: size,
+                }
+            },
+            Operation::Subtract(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
+                                ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
+                let stride = gcd(a_stride,b_stride);
+                let size = cmp::max(a_size,b_size);
+                let first = (a_first - b_last) % (1 << size);
+                let last = (a_last - b_first) % (1 << size);
+
+                ExtStridedInterval::Interval{
+                    stride: stride,
+                    first: first,
+                    last: last,
+                    size: size,
+                }
+            },
+            //Operation::Multiply(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
+            //Operation::DivideSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
+            //Operation::DivideUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
+            //Operation::Modulo(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Modulo(a,b))),
+            //Operation::ShiftRightSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftRightSigned(a,b))),
+            //Operation::ShiftRightUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftRightUnsigned(a,b))),
+            //Operation::ShiftLeft(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::ShiftLeft(a,b))),
+
+            //Operation::LessOrEqualSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualSigned(a,b))),
+            //Operation::LessOrEqualUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualUnsigned(a,b))),
+            //Operation::LessSigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessSigned(a,b))),
+            //Operation::LessUnsigned(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::LessUnsigned(a,b))),
+            //Operation::Equal(ref a,ref b) =>
+            //    permute(a,b,&|a,b| execute(Operation::Equal(a,b))),
+
+            //Operation::Move(ref a) =>
+            //    map(a,&|a| execute(Operation::Move(a))),
+            //Operation::Call(ref a) =>
+            //    map(a,&|a| execute(Operation::Call(a))),
+            //Operation::ZeroExtend(ref sz,ref a) =>
+            //    map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
+            //Operation::SignExtend(ref sz,ref a) =>
+            //    map(a,&|a| execute(Operation::SignExtend(*sz,a))),
+
+            //Operation::Load(ref r,ref a) =>
+            //    map(a,&|a| execute(Operation::Load(r.clone(),a))),
+            //Operation::Store(ref r,ref a) =>
+            //    map(a,&|a| execute(Operation::Store(r.clone(),a))),
+
+            //Operation::Phi(_) => unreachable!(),
+            _ => ExtStridedInterval::Join,
+        }
+    }*/
+
+    fn narrow(&self, a: &Self) -> Self {
+        unimplemented!()
+    }
+
+    fn combine(&self,a: &Self) -> Self {
+        ExtStridedInterval::Join
+    }
+    
+    fn widen(&self,_: &Self) -> Self {
+        ExtStridedInterval::Join
+    }
+
+    fn initial() -> Self {
+        ExtStridedInterval::Meet
+    }
+
+    fn more_exact(&self, a: &Self) -> bool {
+        unimplemented!()
+    }
+}
+
+// Linus Kaellberg: "Circular Linear Progressions in SWEET"
+#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
+pub struct Clp {
+    pub width: usize,
+    pub base: u64,
+    pub stride: u64,
+    pub cardinality: u64,
+}
+
+impl Clp {
+    pub fn is_bottom(&self) -> bool {
+        self.cardinality == 0
+    }
+
+    pub fn is_top(&self) -> bool {
+        (64 - self.cardinality.leading_zeros()) as usize >= self.width &&
+        self.stride & 1 != 0
+    }
+
+    pub fn canonize(a: Clp) -> Clp {
+        let m = 1u64 << cmp::min(a.width,63);
+        match a {
+            Clp{ width, cardinality: 0,.. } =>
+                Clp{
+                    width: width,
+                    base: 0,
+                    stride: 0,
+                    cardinality: 0,
+                },
+            Clp{ width, base, cardinality: 1,.. } =>
+                Clp{
+                    width: width,
+                    base: if width < 64 { base % m } else { base },
+                    stride: 0,
+                    cardinality: 1,
+                },
+            Clp{ width, base, stride, cardinality } => {
+                let k = if stride == 0 { 1 }
+                        else if width < 64 { lcm(m,stride) / stride }
+                        else { stride };
+
+                if cardinality >= k && k >= 2 {
+                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
+                    Clp{
+                        width: width,
+                        base: base % s,
+                        stride: s,
+                        cardinality: k,
+                    }
+                } else if cardinality == k - 1 && cardinality >= 2 {
+                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
+
+                    Clp{
+                        width: width,
+                        base: if width < 64 { (base + (cardinality * stride) + s) % m } else { base },
+                        stride: if width < 64 { gcd(stride,m) % m } else { stride },
+                        cardinality: cardinality,
+                    }
+                } else {
+                    if stride % m < (m >> 1) {
+                        Clp{
+                            width: width,
+                            base: if width < 64 { base % m } else { base },
+                            stride: if width < 64 { stride % m } else { stride },
+                            cardinality: cardinality,
+                        }
+                    } else {
+                        let b = (cardinality - 1) * stride + base;
+                        Clp{
+                            width: width,
+                            base: if width < 64 { b % m } else { b },
+                            stride: if width < 64 { (m - stride) % m } else { stride },
+                            cardinality: cardinality,
+                        }
+                    }
+                }
+            },
         }
     }
 }
@@ -754,5 +1011,196 @@ mod tests {
 
         assert_eq!(res.get(&(Cow::Borrowed("a"),32)),Some(&Sign::Positive));
         assert_eq!(res.get(&(Cow::Borrowed("b"),32)),Some(&Sign::Positive));
+    }
+
+    /*
+     * a = 10
+     * b = 0
+     * c = 4
+     * if (c == 1) {
+     *   a += 5;
+     *   b = a * c;
+     *   c = 2
+     * } else {
+     *   while(a > 0) {
+     *     a -= 1
+     *     b += 3
+     *     c = 3
+     *   }
+     * }
+     * x = a + b;
+     */
+    #[test]
+    fn kset_test() {
+        let a_var = Lvalue::Variable{ name: Cow::Borrowed("a"), size: 32, subscript: None };
+        let b_var = Lvalue::Variable{ name: Cow::Borrowed("b"), size: 32, subscript: None };
+        let c_var = Lvalue::Variable{ name: Cow::Borrowed("c"), size: 32, subscript: None };
+        let x_var = Lvalue::Variable{ name: Cow::Borrowed("x"), size: 32, subscript: None };
+        let flag = Lvalue::Variable{ name: Cow::Borrowed("flag"), size: 1, subscript: None };
+        let bb0 = BasicBlock::from_vec(vec![
+                                       Mnemonic::new(0..1,"assign a".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Move(Rvalue::new_u32(10)), assignee: a_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(1..2,"assign b".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Move(Rvalue::new_u32(0)), assignee: b_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(2..3,"assign c".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Move(Rvalue::new_u32(4)), assignee: c_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(3..4,"cmp c".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Equal(c_var.clone().into(),Rvalue::new_u32(1)), assignee: flag.clone()}].iter()).ok().unwrap()]);
+
+        let bb1 = BasicBlock::from_vec(vec![
+                                       Mnemonic::new(4..5,"add a and 5".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Add(a_var.clone().into(),Rvalue::new_u32(5)), assignee: a_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(5..6,"mul a and c".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Add(a_var.clone().into(),c_var.clone().into()), assignee: b_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(6..7,"assign c".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Move(Rvalue::new_u32(2)), assignee: c_var.clone()}].iter()).ok().unwrap()]);
+        let bb2 = BasicBlock::from_vec(vec![
+                                       Mnemonic::new(7..8,"dec a".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Subtract(a_var.clone().into(),Rvalue::new_u32(1)), assignee: a_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(8..9,"add 3 to b".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Add(b_var.clone().into(),Rvalue::new_u32(3)), assignee: b_var.clone()}].iter()).ok().unwrap(),
+                                       Mnemonic::new(9..10,"assign c".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Move(Rvalue::new_u32(3)), assignee: c_var.clone()}].iter()).ok().unwrap()]);
+        let bb3 = BasicBlock::from_vec(vec![
+                                       Mnemonic::new(10..11,"add a and b".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::Add(a_var.clone().into(),b_var.clone().into()), assignee: x_var.clone()}].iter()).ok().unwrap()]);
+        let bb4 = BasicBlock::from_vec(vec![
+                                       Mnemonic::new(11..12,"cmp a".to_string(),"".to_string(),vec![].iter(),vec![
+                                                     Statement{ op: Operation::LessOrEqualSigned(a_var.clone().into(),Rvalue::new_u32(0)), assignee: flag.clone()}].iter()).ok().unwrap()]);
+
+
+        let mut cfg = ControlFlowGraph::new();
+
+        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
+        let v2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
+        let v3 = cfg.add_vertex(ControlFlowTarget::Resolved(bb3));
+        let v4 = cfg.add_vertex(ControlFlowTarget::Resolved(bb4));
+
+        let g = Guard::from_flag(&flag.into()).ok().unwrap();
+
+        cfg.add_edge(g.clone(),v0,v1);
+        cfg.add_edge(g.negation(),v0,v4);
+        cfg.add_edge(g.negation(),v4,v2);
+        cfg.add_edge(g.clone(),v4,v3);
+        cfg.add_edge(Guard::always(),v2,v4);
+        cfg.add_edge(Guard::always(),v1,v3);
+
+        let mut func = Function::new("func".to_string(),"ram".to_string());
+
+        func.cflow_graph = cfg;
+        func.entry_point = Some(v0);
+
+        ssa_convertion(&mut func);
+
+        let vals = approximate::<Kset>(&func).ok().unwrap();
+        let res = results::<Kset>(&func,&vals);
+
+        assert_eq!(res[&(Cow::Borrowed("a"),32)],Kset::Join);
+        assert_eq!(res[&(Cow::Borrowed("b"),32)],Kset::Join);
+        assert_eq!(res[&(Cow::Borrowed("c"),32)],Kset::Set(vec![(2,32),(3,32),(4,32)]));
+        assert_eq!(res[&(Cow::Borrowed("x"),32)],Kset::Join);
+    }
+
+    #[test]
+    fn bit_extract() {
+        let p_var = Lvalue::Variable{ name: Cow::Borrowed("p"), size: 22, subscript: None };
+        let r1_var = Lvalue::Variable{ name: Cow::Borrowed("r1"), size: 8, subscript: None };
+        let r2_var = Lvalue::Variable{ name: Cow::Borrowed("r2"), size: 8, subscript: None };
+        let next = Lvalue::Variable{ name: Cow::Borrowed("R30:R31"), size: 22, subscript: None };
+        let bb0 = BasicBlock::from_vec(vec![
+            Mnemonic::new(0..1,"init r1".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::Move(Rvalue::new_u8(7)), assignee: r1_var.clone()}].iter()).ok().unwrap(),
+            Mnemonic::new(1..2,"init r2".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::Move(Rvalue::new_u8(88)), assignee: r2_var.clone()}].iter()).ok().unwrap()
+        ]);
+        let bb1 = BasicBlock::from_vec(vec![
+            Mnemonic::new(2..3,"zext r1".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::ZeroExtend(22,r1_var.clone().into()), assignee: p_var.clone()}].iter()).ok().unwrap(),
+            Mnemonic::new(3..4,"mov r2".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::Select(8,p_var.clone().into(),r2_var.clone().into()), assignee: p_var.clone()}].iter()).ok().unwrap(),
+            Mnemonic::new(4..5,"mov 0".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::Select(16,p_var.clone().into(),Rvalue::Constant{ value: 0, size: 6 }), assignee: p_var.clone()}].iter()).ok().unwrap(),
+            Mnemonic::new(5..6,"mov next".to_string(),"".to_string(),vec![].iter(),vec![
+                Statement{ op: Operation::Move(p_var.clone().into()), assignee: next.clone()}].iter()).ok().unwrap()
+        ]);
+        let mut cfg = ControlFlowGraph::new();
+        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
+
+        cfg.add_edge(Guard::always(),v0,v1);
+
+        let mut func = Function::new("func".to_string(),"ram".to_string());
+
+        func.cflow_graph = cfg;
+        func.entry_point = Some(v0);
+
+        ssa_convertion(&mut func);
+
+        let vals = approximate::<Kset>(&func).ok().unwrap();
+
+        for i in vals {
+            println!("{:?}",i);
+        }
+    }
+
+    #[test]
+ /*   fn ext_strided_interval() {
+
+        {
+            let a = ExtStridedInterval::Interval{
+                stride: 4, first: 0x7ff0, last: 0x7ffc, size: 16 };
+            let b = ExtStridedInterval::Interval{
+                stride: 0, first: 4, last: 4, size: 16 };
+            let res = ExtStridedInterval::execute(&Operation::Add(a,b));
+            let exp = ExtStridedInterval::Interval{
+                stride: 4, first: 0x7ff4, last: 0x8000, size: 16 };
+
+            assert_eq!(res, exp);
+        }
+
+        {
+            let a = ExtStridedInterval::Interval{
+                stride: 1, first: 10, last: 20, size: 16 };
+            let b = ExtStridedInterval::Interval{
+                stride: 1, first: 0xfffffffffffffffe, last: 2, size: 64 };
+            let exp = vec![
+                ExtStridedInterval::Interval{
+                    stride: 1, first: 0, last: 2, size: 64 },
+                ExtStridedInterval::Interval{
+                    stride: 1, first: 0xfffffffffffffffe, last: 0xffffffffffffffff, size: 64 }
+            ];
+
+            assert_eq!(a.dsi(), vec![a]);
+            assert_eq!(b.dsi(), exp);
+        }
+    }*/
+
+    #[test]
+    fn circular_linear_progression() {
+
+        {
+            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 19 };
+            let c = Clp{ width: 8, base: 8, stride: 16, cardinality: 16 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 19 });
+        }
+
+        {
+            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 15 };
+            let c = Clp{ width: 8, base: 184, stride: 16, cardinality: 15 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 15 });
+        }
+
+        {
+            let a = Clp{ width: 8, base: 90, stride: 132, cardinality: 7 };
+            let c = Clp{ width: 8, base: 114, stride: 124, cardinality: 7 };
+
+            assert_eq!(c, Clp::canonize(a));
+            Clp::canonize(Clp{ width: 64, base: 90, stride: 132, cardinality: 7 });
+        }
     }
 }
