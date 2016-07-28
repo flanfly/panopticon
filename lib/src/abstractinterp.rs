@@ -858,13 +858,44 @@ impl<I: Integer + Signed + Decodable + Encodable + Debug + Clone + Copy + Shr<us
             let last = cmp::min(max,split_pnt * (j + I::one()));
             let n = (last - first) / a.stride + I::one();
 
+            if n <= I::zero() { break; }
+
+            ret.push(Clp::<I>{
+                width: a.width,
+                base: first - (j * split_pnt),
+                stride: a.stride,
+                cardinality: n,
+            });
+
+            i = i + n;
+            j = j + I::one();
+        }
+
+        ret
+    }
+
+    pub fn signed_progression(_a: Clp<I>) -> Vec<Clp<I>> {
+        let a = Self::canonize(_a);
+        let mut i = I::zero();
+        let mut j = I::zero();
+        let span = Self::mask(a.width) + I::one();
+        let split_pnt = span / (I::one() + I::one());
+        let mut ret = vec![];
+
+        while i < a.cardinality {
+            let first = a.base + i * a.stride - j * span;
+            let c = cmp::max(I::zero(),a.cardinality);
+            let max = a.base + (c - I::one()) * a.stride - j * span;
+            let last = cmp::min(max,split_pnt * (j + I::one()));
+            let n = (last - first) / a.stride + I::one();
+
             println!("first: {:?}, max: {:?}, last: {:?}, n: {:?}",first,max,last,n);
 
             if n <= I::zero() { break; }
 
             ret.push(Clp::<I>{
                 width: a.width,
-                base: first - (j * split_pnt),
+                base: first,
                 stride: a.stride,
                 cardinality: n,
             });
@@ -1510,14 +1541,14 @@ mod tests {
             assert_eq!(c, Clp::union(u1,u2));
         }
 
-        /* signed union
+        // signed union
         {
             let c = Clp{ width: 8, base: 60, stride: 30, cardinality: 10 };
             let u1 = Clp{ width: 8, base: 60, stride: 30, cardinality: 3 };
             let u2 = Clp{ width: 8, base: -106, stride: 30, cardinality: 7 };
 
             assert_eq!(c, Clp::union(u1,u2));
-        }*/
+        }
 
         // unsigned AP
         {
@@ -1525,6 +1556,21 @@ mod tests {
             let ap = Clp::unsigned_progression(c.clone());
             let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 7 };
             let u2 = Clp::<i64>{ width: 8, base: 14, stride: 30, cardinality: 3 };
+
+            assert_eq!(ap.len(), 2);
+            assert!(ap[0] == u1 || ap[0] == u2);
+            assert!(ap[1] == u1 || ap[1] == u2);
+            assert!(ap[0] != ap[1]);
+
+            assert_eq!(c, Clp::union(u1,u2));
+        }
+
+        // signed AP
+        {
+            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let ap = Clp::signed_progression(c.clone());
+            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 3 };
+            let u2 = Clp::<i64>{ width: 8, base: -106, stride: 30, cardinality: 7 };
 
             assert_eq!(ap.len(), 2);
             assert!(ap[0] == u1 || ap[0] == u2);
