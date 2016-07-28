@@ -97,6 +97,8 @@ extern crate goblin;
 #[macro_use]
 extern crate quickcheck;
 
+extern crate extprim;
+
 // core
 pub mod disassembler;
 pub use disassembler::{

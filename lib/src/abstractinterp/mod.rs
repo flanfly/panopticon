@@ -36,8 +36,9 @@ use std::collections::{HashSet,HashMap};
 use std::iter::FromIterator;
 use std::borrow::Cow;
 use std::cmp;
-use num::abs;
+use num::{Integer,Unsigned,Signed,abs};
 use num::integer::{lcm,gcd};
+use std::ops::{Shl,Shr,BitOr,BitAnd};
 
 use graph_algos::{
     GraphTrait,
@@ -619,76 +620,178 @@ impl Avalue for ExtStridedInterval {
 
 // Linus Kaellberg: "Circular Linear Progressions in SWEET"
 #[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
-pub struct Clp {
+pub struct Clp<I: Integer + Signed + Decodable + Encodable + Clone + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I>> {
     pub width: usize,
-    pub base: u64,
-    pub stride: u64,
-    pub cardinality: u64,
+    pub base: I,
+    pub stride: I,
+    pub cardinality: I,
 }
 
-impl Clp {
+
+impl<I: Integer + Signed + Decodable + Encodable + Debug + Clone + Copy + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I>> Clp<I> {
     pub fn is_bottom(&self) -> bool {
-        self.cardinality == 0
+        self.cardinality == I::zero()
     }
 
     pub fn is_top(&self) -> bool {
-        (64 - self.cardinality.leading_zeros()) as usize >= self.width &&
-        self.stride & 1 != 0
+        let c = cmp::max(I::zero(),self.cardinality);
+        c <= Self::mask(self.width) && self.stride.is_odd()
     }
 
-    pub fn canonize(a: Clp) -> Clp {
-        let m = 1u64 << cmp::min(a.width,63);
-        match a {
-            Clp{ width, cardinality: 0,.. } =>
-                Clp{
-                    width: width,
-                    base: 0,
-                    stride: 0,
-                    cardinality: 0,
-                },
-            Clp{ width, base, cardinality: 1,.. } =>
-                Clp{
-                    width: width,
-                    base: if width < 64 { base % m } else { base },
-                    stride: 0,
-                    cardinality: 1,
-                },
-            Clp{ width, base, stride, cardinality } => {
-                let k = if stride == 0 { 1 }
-                        else if width < 64 { lcm(m,stride) / stride }
-                        else { stride };
+    fn mask(w: usize) -> I {
+        let mut ret = I::one();
 
-                if cardinality >= k && k >= 2 {
-                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
-                    Clp{
+        for _ in 1..w {
+            ret = ret << 1;
+            ret = ret | I::one();
+        }
+
+        ret
+    }
+
+    pub fn unsigned_progression(_a: Clp<I>) -> Vec<Clp<I>> {
+        let a = Self::canonize(_a);
+        let mut i = I::zero();
+        let mut j = I::zero();
+        let msk = Self::mask(a.width);
+        let split_pnt = msk + I::one();
+        let mut ret = vec![];
+
+        while i < a.cardinality {
+            let first = a.base + (i * a.stride);
+            let c = cmp::max(I::zero(),a.cardinality);
+            let max = a.base + (c - I::one()) * a.stride;
+            let last = cmp::min(max,split_pnt * (j + I::one()));
+            let n = (last - first) / a.stride + I::one();
+
+            println!("first: {:?}, max: {:?}, last: {:?}, n: {:?}",first,max,last,n);
+
+            if n <= I::zero() { break; }
+
+            ret.push(Clp::<I>{
+                width: a.width,
+                base: first - (j * split_pnt),
+                stride: a.stride,
+                cardinality: n,
+            });
+
+            i = i + n;
+            j = j + I::one();
+        }
+
+        ret
+    }
+
+    pub fn union(_a: Clp<I>, _b: Clp<I>) -> Clp<I> {
+        assert_eq!(_a.width, _b.width);
+
+        let a = Clp::<I>::canonize(_a);
+        let b = Clp::<I>::canonize(_b);
+
+        if a.is_bottom() { return b; } else if b.is_bottom() { return a; }
+
+        if a.cardinality == I::one() && b.cardinality == I::one() {
+            return Clp::<I>{
+                width: a.width,
+                base: cmp::min(a.base,b.base),
+                stride: abs(a.base - b.base),
+                cardinality: I::one() + I::one(),
+            };
+        }
+
+        fn _union<
+            I: Integer + Signed + Decodable + Encodable + Clone + Copy + Debug + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I>>(a: &Clp<I>, b: &Clp<I>) -> Clp<I> {
+            let ca = cmp::max(I::zero(),a.cardinality);
+            let cb = cmp::max(I::zero(),b.cardinality);
+            let la = a.base + a.stride * (ca - I::one());
+            let lb = b.base + b.stride * (cb - I::one());
+            let base = cmp::min(a.base,b.base);
+            let t1 = cmp::max(la,lb);
+            let s = gcd(gcd(a.stride,b.stride),abs(a.base - b.base));
+
+            Clp::<I>{
+                width: a.width,
+                base: base,
+                stride: s,
+                cardinality: cmp::max(I::zero(),(((t1 - base) / s) + I::one())),
+            }
+        }
+
+        let w = Self::mask(a.width) + I::one();
+        let mut ret: Option<Clp<I>> = None;
+        let mut m = I::zero() - I::one();
+        for _ in -1..2 {
+            let x = _union(&a,&Clp::<I>{
+                width: b.width,
+                base: b.base + w * m,
+                stride: b.stride,
+                cardinality: b.cardinality
+            });
+
+            if ret.is_none() || ret.as_ref().unwrap().cardinality > x.cardinality {
+                ret = Some(x)
+            }
+
+            m = m + I::one();
+        }
+
+        ret.unwrap()
+    }
+
+    pub fn canonize(a: Clp<I>) -> Clp<I> {
+        let msk = Self::mask(a.width);
+        let w = msk + I::one();
+        match a {
+            Clp::<I>{ width, cardinality: ref c,.. } if *c == I::zero() =>
+                Clp::<I>{
+                    width: width,
+                    base: I::zero(),
+                    stride: I::zero(),
+                    cardinality: I::zero(),
+                },
+            Clp::<I>{ width,ref base, cardinality: ref c,.. } if *c == I::one() =>
+                Clp::<I>{
+                    width: width,
+                    base: *base & msk,
+                    stride: I::zero(),
+                    cardinality: I::one(),
+                },
+            Clp::<I>{ width, base, stride, cardinality } => {
+                let k = if stride == I::zero() { I::one() } else { lcm(w,stride) / stride };
+                let c = cmp::max(I::zero(),cardinality);
+
+                if c >= k && k >= I::one() + I::one() {
+                    let s = gcd(stride,w) & msk;
+
+                    Clp::<I>{
                         width: width,
                         base: base % s,
                         stride: s,
-                        cardinality: k,
+                        cardinality: cmp::max(I::zero(),k),
                     }
-                } else if cardinality == k - 1 && cardinality >= 2 {
-                    let s = if width < 64 { gcd(stride,m) % m } else { stride };
+                } else if c == k - I::one() && c >= I::one() + I::one() {
+                    let s = gcd(stride,w) & msk;
 
-                    Clp{
+                    Clp::<I>{
                         width: width,
-                        base: if width < 64 { (base + (cardinality * stride) + s) % m } else { base },
-                        stride: if width < 64 { gcd(stride,m) % m } else { stride },
+                        base: (base + (c * stride) + s) & msk,
+                        stride: gcd(stride,w) & msk,
                         cardinality: cardinality,
                     }
                 } else {
-                    if stride % m < (m >> 1) {
-                        Clp{
+                    if stride & msk < w >> 1 {
+                        Clp::<I>{
                             width: width,
-                            base: if width < 64 { base % m } else { base },
-                            stride: if width < 64 { stride % m } else { stride },
+                            base: base & msk,
+                            stride: stride & msk,
                             cardinality: cardinality,
                         }
                     } else {
-                        let b = (cardinality - 1) * stride + base;
-                        Clp{
+                        let b = (c - I::one()) * stride + base;
+                        Clp::<I>{
                             width: width,
-                            base: if width < 64 { b % m } else { b },
-                            stride: if width < 64 { (m - stride) % m } else { stride },
+                            base: b & msk,
+                            stride: (w - stride) & msk,
                             cardinality: cardinality,
                         }
                     }
@@ -1179,28 +1282,62 @@ mod tests {
     #[test]
     fn circular_linear_progression() {
 
+        // canonize
         {
-            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 19 };
-            let c = Clp{ width: 8, base: 8, stride: 16, cardinality: 16 };
+            let a = Clp::<i64>{ width: 8, base: 216, stride: 48, cardinality: 19 };
+            let c = Clp::<i64>{ width: 8, base: 8, stride: 16, cardinality: 16 };
 
             assert_eq!(c, Clp::canonize(a));
-            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 19 });
+            Clp::canonize(Clp::<i64>{ width: 64, base: 216, stride: 48, cardinality: 19 });
         }
 
         {
-            let a = Clp{ width: 8, base: 216, stride: 48, cardinality: 15 };
-            let c = Clp{ width: 8, base: 184, stride: 16, cardinality: 15 };
+            let a = Clp::<i64>{ width: 8, base: 216, stride: 48, cardinality: 15 };
+            let c = Clp::<i64>{ width: 8, base: 184, stride: 16, cardinality: 15 };
 
             assert_eq!(c, Clp::canonize(a));
-            Clp::canonize(Clp{ width: 64, base: 216, stride: 48, cardinality: 15 });
+            Clp::canonize(Clp::<i64>{ width: 64, base: 216, stride: 48, cardinality: 15 });
         }
 
         {
-            let a = Clp{ width: 8, base: 90, stride: 132, cardinality: 7 };
-            let c = Clp{ width: 8, base: 114, stride: 124, cardinality: 7 };
+            let a = Clp::<i64>{ width: 8, base: 90, stride: 132, cardinality: 7 };
+            let c = Clp::<i64>{ width: 8, base: 114, stride: 124, cardinality: 7 };
 
             assert_eq!(c, Clp::canonize(a));
-            Clp::canonize(Clp{ width: 64, base: 90, stride: 132, cardinality: 7 });
+            Clp::canonize(Clp::<i64>{ width: 64, base: 90, stride: 132, cardinality: 7 });
+        }
+
+        // unsigned union
+        {
+            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 7 };
+            let u2 = Clp::<i64>{ width: 8, base: 14, stride: 30, cardinality: 3 };
+
+            assert_eq!(c, Clp::union(u1,u2));
+        }
+
+        /* signed union
+        {
+            let c = Clp{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let u1 = Clp{ width: 8, base: 60, stride: 30, cardinality: 3 };
+            let u2 = Clp{ width: 8, base: -106, stride: 30, cardinality: 7 };
+
+            assert_eq!(c, Clp::union(u1,u2));
+        }*/
+
+        // unsigned AP
+        {
+            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let ap = Clp::unsigned_progression(c.clone());
+            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 7 };
+            let u2 = Clp::<i64>{ width: 8, base: 14, stride: 30, cardinality: 3 };
+
+            assert_eq!(ap.len(), 2);
+            assert!(ap[0] == u1 || ap[0] == u2);
+            assert!(ap[1] == u1 || ap[1] == u2);
+            assert!(ap[0] != ap[1]);
+
+            assert_eq!(c, Clp::union(u1,u2));
         }
     }
 }
