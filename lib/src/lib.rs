@@ -122,6 +122,7 @@ extern crate rmp_serialize;
 extern crate lazy_static;
 
 extern crate byteorder;
+extern crate extprim;
 
 // core
 pub mod disassembler;
