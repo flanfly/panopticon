@@ -36,7 +36,7 @@ use std::collections::{HashSet,HashMap};
 use std::iter::FromIterator;
 use std::borrow::Cow;
 use std::cmp;
-use num::{Integer,Unsigned,Signed,abs,NumCast};
+use num::{Integer,Unsigned,Signed,abs,FromPrimitive};
 use num::integer::{lcm,gcd};
 use std::ops::{Shl,Shr,BitOr,BitAnd,Div,BitXor};
 
@@ -628,7 +628,7 @@ pub struct Clp<I: Integer + Signed + Decodable + Encodable + Clone + Shr<usize,O
 }
 
 
-impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Copy + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + Div + BitXor<Output=I>> Clp<I> {
+impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone + Copy + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + Div + BitXor<Output=I>> Clp<I> {
     /// Computes the gcd of a and b, and the Bezout coeffcient of a
     fn eea(a: &I,b: &I) -> (I,I) {
         let mut s = I::zero();
@@ -1037,7 +1037,7 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
 
     fn execute(pp: &ProgramPoint, op: &Operation<Self>) -> Self {
         fn permute<
-            I: Integer + NumCast + Signed + Decodable + Encodable + Clone + Copy + Debug + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + BitXor<Output=I>
+            I: Integer + FromPrimitive + Signed + Decodable + Encodable + Clone + Copy + Debug + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + BitXor<Output=I>
             >(a: Vec<Clp<I>>, b: Vec<Clp<I>>, f: &Fn(Clp<I>,Clp<I>) -> Clp<I>) -> Clp<I> {
             let mut ret: Option<Clp<I>> = None;
             for x in a.iter() {
@@ -1321,7 +1321,7 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
                         cmp::max(a.base / b.last(),
                         cmp::max(a.last() / b.base,
                         a.last() / b.last())));
-                    let stride = if b.cardinality <= I::from(10).unwrap() {
+                    let stride = if b.cardinality <= I::from_usize(10).unwrap() {
                             let mut c1 = true;
                             let mut c2 = true;
                             let mut r = None;
@@ -1395,7 +1395,7 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
                     }
 
                     let base = a.base / b.last();
-                    let stride = if b.cardinality <= I::from(10).unwrap() {
+                    let stride = if b.cardinality <= I::from_usize(10).unwrap() {
                             let mut c = true;
                             let mut r = None;
                             let mut i = I::zero();
@@ -1569,15 +1569,87 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
                 let y = Clp::execute(pp,&Operation::Equal(a.clone(),b.clone()));
                 Clp::execute(pp,&Operation::InclusiveOr(x,y))
             },
+
             Operation::LessOrEqualUnsigned(ref a,ref b) => {
                 let x = Clp::execute(pp,&Operation::LessUnsigned(a.clone(),b.clone()));
                 let y = Clp::execute(pp,&Operation::Equal(a.clone(),b.clone()));
                 Clp::execute(pp,&Operation::InclusiveOr(x,y))
             },
-            //Operation::LessSigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessSigned(a,b))),
-            //Operation::LessUnsigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessUnsigned(a,b))),
+
+            Operation::LessSigned(ref a,ref b) => {
+                if a.is_bottom() || b.is_bottom() {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::zero(),
+                        cardinality: I::zero(),
+                    }
+                }
+
+                let (min1,max1) = Self::signed_minmax(a);
+                let (min2,max2) = Self::signed_minmax(b);
+
+                if max1 < min2 {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::one(),
+                        stride: I::zero(),
+                        cardinality: I::one(),
+                    }
+                } else if min1 >= max2 {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::zero(),
+                        cardinality: I::one(),
+                    }
+                } else {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::one(),
+                        cardinality: I::one() + I::one(),
+                    }
+                }
+            },
+
+            Operation::LessUnsigned(ref a,ref b) => {
+                if a.is_bottom() || b.is_bottom() {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::zero(),
+                        cardinality: I::zero(),
+                    }
+                }
+
+                let (min1,max1) = Self::unsigned_minmax(a);
+                let (min2,max2) = Self::unsigned_minmax(b);
+
+                if max1 < min2 {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::one(),
+                        stride: I::zero(),
+                        cardinality: I::one(),
+                    }
+                } else if min1 >= max2 {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::zero(),
+                        cardinality: I::one(),
+                    }
+                } else {
+                    return Clp::<I>{
+                        width: 1,
+                        base: I::zero(),
+                        stride: I::one(),
+                        cardinality: I::one() + I::one(),
+                    }
+                }
+            }, 
+
             Operation::Equal(ref a,ref b) => {
                 if a.is_bottom() || b.is_bottom() {
                     Clp::<I>{
@@ -1613,18 +1685,39 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
             Operation::Move(ref a) => a.clone(),
             Operation::Call(ref a) => a.clone(),
 
-            //Operation::ZeroExtend(ref sz,ref a) =>
-            //    map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
-            //Operation::SignExtend(ref sz,ref a) =>
-            //    map(a,&|a| execute(Operation::SignExtend(*sz,a))),
+            Operation::ZeroExtend(ref sz,ref a) => Clp::<I>{
+                width: *sz,
+                base: a.base,
+                stride: a.stride,
+                cardinality: a.cardinality,
+            },
 
-            Operation::Load(ref r,ref a) => Clp::<I>{
+            Operation::SignExtend(ref sz,ref a) => Clp::<I>{
+                width: *sz,
+                base: a.base,
+                stride: a.stride,
+                cardinality: a.cardinality,
+            },
+
+            Operation::Select(ref off,ref a,ref b) => {
+                let o = Clp::<I>{
+                    width: a.width,
+                    base: I::from_usize(*off).unwrap(),
+                    stride: I::zero(),
+                    cardinality: I::one(),
+                };
+                let x = Clp::execute(pp,&Operation::ShiftRightUnsigned(a.clone(),o));
+                Clp::execute(pp,&Operation::DivideUnsigned(x,b.clone()))
+            },
+
+            Operation::Load(_,ref a) => Clp::<I>{
                 width: a.width,
                 base: I::zero(),
                 stride: I::one(),
                 cardinality: Clp::<I>::mask(a.width),
             },
-            Operation::Store(ref r,ref a) => a.clone(),
+
+            Operation::Store(_,ref a) => a.clone(),
 
             Operation::Phi(ref v) => match v.len() {
                 0 => unreachable!(),
@@ -1633,7 +1726,6 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
                     Clp::<I>::union(&acc,x)
                 }),
             },
-            _ => unreachable!()
         }
     }
 }
