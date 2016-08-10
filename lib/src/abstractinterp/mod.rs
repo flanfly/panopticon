@@ -748,8 +748,111 @@ impl<I: Integer + NumCast + Signed + Decodable + Encodable + Debug + Clone + Cop
         ret
     }
 
-    fn intersection(_: &Clp<I>, _: &Clp<I>) -> Clp<I> {
-        unimplemented!()
+    fn closest_element(c: &Clp<I>, l: &I) -> (I,I,I,I,I,I) {
+        let w = Self::mask(c.width) + I::one();
+
+        if c.cardinality == I::one() {
+            let z = I::zero();
+            return (z,z,z,w,w,c.base - *l);
+        }
+
+        let mut ia = I::one();
+        let mut ib = I::one();
+        let mut alpha = c.stride;
+        let mut beta = w - c.stride;
+        let (mut ic,mut gamma) = if (c.base - *l) % w < (c.base + c.stride - *l) % w {
+            (I::zero(),(c.base - *l) % w)
+        } else {
+            (I::one(),(c.base + c.stride - *l) % w)
+        };
+
+        while ia + ib < c.cardinality {
+            if alpha < beta {
+                let kk = {
+                    let t = gamma - beta;
+                    if t % alpha == I::zero() {
+                        -t / alpha
+                    } else {
+                        -t / alpha + I::one()
+                    }
+                };
+
+                if kk <= (c.cardinality - I::one() - (ic + ib)) / ia && -beta + kk * alpha < I::zero() {
+                    ic = ic + ib + kk* ia;
+                    gamma = gamma - beta + kk * alpha;
+                }
+
+                let k = cmp::min((beta - I::one()) / alpha,(c.cardinality - I::one() - ib) / ia);
+                ib = ib + k * ia;
+                beta = beta - k * alpha;
+            } else {
+                let kk = cmp::min(gamma / beta,(c.cardinality - I::one() - ic) / ib);
+                ic = ic + kk * ib;
+                gamma = gamma - kk * beta;
+                let k = cmp::min((alpha - I::one()) / beta,(c.cardinality - I::one() - ia) / ib);
+                ia = ia + k * ia;
+                alpha = alpha - k * beta;
+            }
+        }
+
+        (ia,ib,ic,alpha,beta,gamma)
+    }
+
+    fn unsigned_minmax(a: &Clp<I>) -> (I,I) {
+        let (_,_,min_idx,_,_,_) = Self::closest_element(a,&I::zero());
+        let msk = Self::mask(a.width);
+
+        ((a.base + min_idx * a.stride) & msk,
+         (a.base + ((min_idx - I::one()) % a.cardinality) * a.stride) & msk)
+    }
+
+    fn signed_minmax(a: &Clp<I>) -> (I,I) {
+        let l = -(I::one() << (a.width - 2));
+        let (_,_,min_idx,_,_,_) = Self::closest_element(&a,&l);
+        let msk = Self::mask(a.width);
+        let half_msk = msk >> 1;
+        let min = (a.base + min_idx * a.stride) & msk;
+        let max = (a.base + ((min_idx - I::one()) % a.cardinality) * a.stride) & msk;
+
+        (if min <= half_msk { min } else { min - msk },
+         if max <= half_msk { max } else { max - msk })
+    }
+
+    fn intersection(a: &Clp<I>, b: &Clp<I>) -> Clp<I> {
+        if a.is_bottom() { return a.clone() }
+        if b.is_bottom() { return b.clone() }
+
+        let (d,s) = Self::eea(&a.stride,&(Self::mask(a.width) + I::one()));
+        let (e,t) = Self::eea(&b.stride,&d);
+        let j0 = (t * (a.base - b.base) / e) % (d / e);
+        let i = Clp::<I>{
+            width: a.width - cmp::max(2,Self::most_significant_bit(&d)) as usize - 1,
+            base: s * (b.base - a.base * b.stride * j0) / d,
+            stride: b.stride * s / e,
+            cardinality: (b.cardinality - j0) / (d / e),
+        };
+        let (i0,i1) = Self::unsigned_minmax(&i);
+        
+        if e % (a.base - b.base) != I::zero() ||
+           j0 >= b.cardinality ||
+           i0 >= a.cardinality {
+            Clp::<I>{
+                width: a.width,
+                base: I::zero(),
+                stride: I::zero(),
+                cardinality: I::zero(),
+            }
+        } else {
+            let (_,_,_,alpha,beta,_) = Self::closest_element(&i,&i.base);
+            let stride = a.stride * gcd(gcd(alpha,beta),alpha + beta);
+            
+            Clp::<I>{
+                width: a.width,
+                base: a.base + a.stride * i0,
+                stride: stride,
+                cardinality: ((a.base + a.stride * i1) / stride) + I::one(),
+            }
+        }
     }
 
     pub fn unsigned_progression(_a: &Clp<I>) -> Vec<Clp<I>> {
