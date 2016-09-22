@@ -122,7 +122,10 @@ extern crate rmp_serialize;
 extern crate lazy_static;
 
 extern crate byteorder;
-extern crate extprim;
+
+#[cfg(test)]
+#[macro_use]
+extern crate quickcheck;
 
 // core
 pub mod disassembler;

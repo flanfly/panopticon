@@ -22,9 +22,10 @@ use std::collections::{HashSet,HashMap};
 use std::iter::FromIterator;
 use std::borrow::Cow;
 use std::cmp;
+use std::num::Wrapping;
 use num::{Integer,Unsigned,Signed,abs,FromPrimitive};
 use num::integer::{lcm,gcd};
-use std::ops::{Shl,Shr,BitOr,BitAnd,Div,BitXor};
+use std::result;
 
 use graph_algos::{
     GraphTrait,
@@ -32,7 +33,10 @@ use graph_algos::{
     VertexListGraphTrait,
     BidirectionalGraphTrait,
 };
-use rustc_serialize::{Encodable,Decodable};
+use rustc_serialize::{
+    Encodable,Decodable,
+    Decoder,Encoder
+};
 use graph_algos::dominator::{
     immediate_dominator,
 };
@@ -322,7 +326,7 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
     ret
 }
 
-const KSET_MAXIMAL_CARDINALITY: usize = 10;
+const KSET_MAXIMAL_CARDINALITY: usize = 10000;
 
 #[derive(Debug,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
 pub enum Kset {
@@ -371,11 +375,15 @@ impl Avalue for Kset {
                         let x = Rvalue::Constant{ value: _x, size: _xs };
                         for &(_y,_ys) in b.iter() {
                             let y = Rvalue::Constant{ value: _y, size: _ys };
-                            if let Rvalue::Constant{ value, size } = f(x.clone(),y) {
-                                ret.insert((value,size));
-                                if ret.len() > KSET_MAXIMAL_CARDINALITY {
-                                    return Kset::Join;
+                            match f(x.clone(),y) {
+                                Rvalue::Constant{ value, size } => {
+                                    ret.insert((value,size));
+                                    if ret.len() > KSET_MAXIMAL_CARDINALITY {
+                                        return Kset::Join;
+                                    }
                                 }
+                                Rvalue::Undefined => return Kset::Join,
+                                _ => {}
                             }
                         }
                     }
@@ -393,14 +401,15 @@ impl Avalue for Kset {
         };
         fn map(_a: &Kset, f: &Fn(Rvalue) -> Rvalue) -> Kset {
             if let &Kset::Set(ref a) = _a {
-                let mut s = HashSet::<(u64,usize)>::from_iter(
-                    a.iter().filter_map(|&(a,_as)| {
-                        if let Rvalue::Constant{ value, size } = f(Rvalue::Constant{ value: a, size: _as }) {
-                            Some((value,size))
-                        } else {
-                            None
-                        }
-                    }));
+                let mut s = HashSet::<(u64,usize)>::new();
+                
+                for &(a,_as) in a.iter() {
+                    match f(Rvalue::Constant{ value: a, size: _as }) {
+                        Rvalue::Constant{ value, size } => { s.insert((value,size)); }
+                        Rvalue::Undefined => return Kset::Join,
+                        _ => {}
+                    }
+                }
 
                 if s.len() > KSET_MAXIMAL_CARDINALITY {
                     Kset::Join
@@ -430,7 +439,11 @@ impl Avalue for Kset {
             Operation::Multiply(ref a,ref b) =>
                 permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
             Operation::DivideSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
+                permute(a,b,&|a,b| {
+                    let x = execute(Operation::DivideSigned(a.clone(),b.clone()));
+                    println!("{:?} / {:?} = {:?}",a,b,x);
+                    x
+                }),
             Operation::DivideUnsigned(ref a,ref b) =>
                 permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
             Operation::Modulo(ref a,ref b) =>
@@ -638,199 +651,57 @@ impl<A: Avalue> Avalue for Widening<A> {
     }
 }
 
-/// Zhan and Koutsoukos: Generic Value-Set Analysis on Low-Level Code
-#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
-pub enum ExtStridedInterval {
-    Join,
-    Interval{
-        stride: u64,
-        first: u64,
-        last: u64,
-        size: usize,
-    },
-    Meet,
-}
-
-impl ExtStridedInterval {
-    fn dsi(&self) -> Vec<ExtStridedInterval> {
-        match *self {
-            ExtStridedInterval::Meet => vec![],
-            ExtStridedInterval::Interval{ stride, first, last, size } => {
-                let signed_max = (1u64 << cmp::max(size - 1,63)) - 1;
-                let l = if size < 64 { 0xffffffffffffffff % (1 << size) } else { 0xffffffffffffffff };
-                if first > signed_max && last > 0 {
-                    vec![
-                        ExtStridedInterval::Interval{
-                            stride: stride, first: 0, last: last, size: size },
-                        ExtStridedInterval::Interval{
-                            stride: stride, first: first, last: l, size: size }
-                    ]
-                } else {
-                    vec![ExtStridedInterval::Interval{
-                        stride: stride, first: first, last: last, size: size }]
-                }
-            },
-            ExtStridedInterval::Join => vec![],
-        }
-    }
-}
-
-impl Avalue for ExtStridedInterval {
-    fn abstract_value(v: &Rvalue) -> Self {
-        if let &Rvalue::Constant{ ref value, ref size } = v {
-            ExtStridedInterval::Interval{ stride: 0, first: *value, last: *value, size: *size }
-        } else {
-            ExtStridedInterval::Join
-        }
-    }
-
-    fn extract(&self,size: usize,offset: usize) -> Self {
-        unimplemented!()
-    }
-
-    fn abstract_constraint(constr: &Constraint) -> Self {
-        unimplemented!()
-    }
-
-    fn execute(_: &ProgramPoint,_: &Operation<Self>) -> Self {
-        unimplemented!()
-    }
-
-    /*
-        match *op {
-            //Operation::And(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::And(a,b))),
-            //Operation::InclusiveOr(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::InclusiveOr(a,b))),
-            //Operation::ExclusiveOr(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::ExclusiveOr(a,b))),
-            Operation::Add(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
-                           ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
-                let stride = gcd(a_stride,b_stride);
-                let size = cmp::max(a_size,b_size);
-                let maybe_first = a_first.checked_add(b_first);
-                let maybe_last = a_last.checked_add(b_last);
-
-                match (maybe_first,maybe_last) {
-                    (Some(first),Some(last)) => {
-                        ExtStridedInterval::Interval{
-                            stride: stride,
-                            first: if size < 64 { first % (1 << size) } else { first },
-                            last: if size < 64 { last % (1 << size) } else { last },
-                            size: size,
-                        }
-                    },
-                    _ => {
-                        
-
-                let last = (a_last + b_last) % (1 << size);
-
-                ExtStridedInterval::Interval{
-                    stride: stride,
-                    first: first,
-                    last: last,
-                    size: size,
-                }
-            },
-            Operation::Subtract(ExtStridedInterval::Interval{ stride: a_stride, first: a_first, last: a_last, size: a_size },
-                                ExtStridedInterval::Interval{ stride: b_stride, first: b_first, last: b_last, size: b_size }) => {
-                let stride = gcd(a_stride,b_stride);
-                let size = cmp::max(a_size,b_size);
-                let first = (a_first - b_last) % (1 << size);
-                let last = (a_last - b_first) % (1 << size);
-
-                ExtStridedInterval::Interval{
-                    stride: stride,
-                    first: first,
-                    last: last,
-                    size: size,
-                }
-            },
-            //Operation::Multiply(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
-            //Operation::DivideSigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
-            //Operation::DivideUnsigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
-            //Operation::Modulo(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::Modulo(a,b))),
-            //Operation::ShiftRightSigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::ShiftRightSigned(a,b))),
-            //Operation::ShiftRightUnsigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::ShiftRightUnsigned(a,b))),
-            //Operation::ShiftLeft(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::ShiftLeft(a,b))),
-
-            //Operation::LessOrEqualSigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualSigned(a,b))),
-            //Operation::LessOrEqualUnsigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessOrEqualUnsigned(a,b))),
-            //Operation::LessSigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessSigned(a,b))),
-            //Operation::LessUnsigned(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::LessUnsigned(a,b))),
-            //Operation::Equal(ref a,ref b) =>
-            //    permute(a,b,&|a,b| execute(Operation::Equal(a,b))),
-
-            //Operation::Move(ref a) =>
-            //    map(a,&|a| execute(Operation::Move(a))),
-            //Operation::Call(ref a) =>
-            //    map(a,&|a| execute(Operation::Call(a))),
-            //Operation::ZeroExtend(ref sz,ref a) =>
-            //    map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
-            //Operation::SignExtend(ref sz,ref a) =>
-            //    map(a,&|a| execute(Operation::SignExtend(*sz,a))),
-
-            //Operation::Load(ref r,ref a) =>
-            //    map(a,&|a| execute(Operation::Load(r.clone(),a))),
-            //Operation::Store(ref r,ref a) =>
-            //    map(a,&|a| execute(Operation::Store(r.clone(),a))),
-
-            //Operation::Phi(_) => unreachable!(),
-            _ => ExtStridedInterval::Join,
-        }
-    }*/
-
-    fn narrow(&self, a: &Self) -> Self {
-        unimplemented!()
-    }
-
-    fn combine(&self,a: &Self) -> Self {
-        ExtStridedInterval::Join
-    }
-    
-    fn widen(&self,_: &Self) -> Self {
-        ExtStridedInterval::Join
-    }
-
-    fn initial() -> Self {
-        ExtStridedInterval::Meet
-    }
-
-    fn more_exact(&self, a: &Self) -> bool {
-        unimplemented!()
-    }
-}
-
 // Linus Kaellberg: "Circular Linear Progressions in SWEET"
-#[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
-pub struct Clp<I: Integer + Signed + Decodable + Encodable + Clone + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I>> {
+#[derive(Debug,PartialEq,Eq,Clone,Hash)]
+pub struct Clp {
     pub width: usize,
-    pub base: I,
-    pub stride: I,
-    pub cardinality: I,
+    pub base: Wrapping<i64>,
+    pub stride: Wrapping<i64>,
+    pub cardinality: Wrapping<i64>,
 }
 
+impl Decodable for Clp {
+    fn decode<D: Decoder>(d: &mut D) -> result::Result<Clp, D::Error> {
+        d.read_struct("Clp", 4, |d| {
+            Ok(Clp{
+                width: try!(d.read_struct_field("width", 0, |d| { d.read_usize() })),
+                base: Wrapping(try!(d.read_struct_field("base", 1, |d| { d.read_i64() }))),
+                stride: Wrapping(try!(d.read_struct_field("stride", 2, |d| { d.read_i64() }))),
+                cardinality: Wrapping(try!(d.read_struct_field("cardinality", 3, |d| { d.read_i64() }))),
+            })
+        })
+    }
+}
 
-impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone + Copy + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + Div + BitXor<Output=I>> Clp<I> {
+impl Encodable for Clp {
+    fn encode<S: Encoder>(&self, s: &mut S) -> result::Result<(), S::Error> {
+        s.emit_struct("Clp", 4, |s| {
+            try!(s.emit_struct_field("width", 0, |s| {
+                s.emit_usize(self.width)
+            }));
+            try!(s.emit_struct_field("base", 1, |s| {
+                s.emit_i64(self.base.0)
+            }));
+            try!(s.emit_struct_field("stride", 2, |s| {
+                s.emit_i64(self.stride.0)
+            }));
+            try!(s.emit_struct_field("cardinality", 3, |s| {
+                s.emit_i64(self.cardinality.0)
+            }));
+            Ok(())
+        })
+    }
+}
+
+impl Clp {
     /// Computes the gcd of a and b, and the Bezout coeffcient of a
-    fn eea(a: &I,b: &I) -> (I,I) {
-        let mut s = I::zero();
-        let mut prev_s = I::one();
+    fn eea(a: &Wrapping<i64>,b: &Wrapping<i64>) -> (Wrapping<i64>,Wrapping<i64>) {
+        let mut s = Wrapping(0i64);
+        let mut prev_s = Wrapping(1i64);
         let mut r = b.clone();
         let mut prev_r = a.clone();
 
-        while r != I::zero() {
+        while r != Wrapping(0i64) {
             let q = prev_r / r;
             let tmp_r = r;
             let tmp_s = s;
@@ -845,12 +716,12 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
         (prev_r,prev_s)
     }
 
-    fn count_ones(mut a: I) -> I {
-        let mut ret = I::zero();
+    fn count_ones(mut a: Wrapping<i64>) -> Wrapping<i64> {
+        let mut ret = Wrapping(0i64);
 
-        while a != I::zero() {
-            if a & I::one() == I::one() {
-                ret = ret + I::one();
+        while a != Wrapping(0i64) {
+            if a & Wrapping(1i64) == Wrapping(1i64) {
+                ret = ret + Wrapping(1i64);
             }
             a = a >> 1;
         }
@@ -858,13 +729,13 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
         ret
     }
 
-    fn trailing_zeros(_a: &I) -> isize {
+    fn trailing_zeros(_a: &Wrapping<i64>) -> isize {
         let mut ret = 0;
         let mut a = _a.clone();
 
-        if a == I::zero() { unreachable!() }
+        if a == Wrapping(0i64) { unreachable!() }
 
-        while a & I::one() == I::zero() {
+        while a & Wrapping(1i64) == Wrapping(0i64) {
             ret += 1;
             a = a >> 1;
         }
@@ -872,13 +743,13 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
         ret
     }
 
-    fn most_significant_bit(_a: &I) -> isize {
+    fn most_significant_bit(_a: &Wrapping<i64>) -> isize {
         let mut ret = 0;
         let mut a = _a.clone();
 
-        if a == I::zero() { unreachable!() }
+        if a == Wrapping(0i64) { unreachable!() }
 
-        while a != I::zero() {
+        while a != Wrapping(0i64) {
             ret += 1;
             a = a >> 1;
         }
@@ -887,30 +758,30 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
     }
 
     pub fn is_bottom(&self) -> bool {
-        self.cardinality == I::zero()
+        self.cardinality == Wrapping(0i64)
     }
 
     pub fn is_top(&self) -> bool {
-        let c = cmp::max(I::zero(),self.cardinality);
-        c <= Self::mask(self.width) && self.stride.is_odd()
+        let c = cmp::max(Wrapping(0i64),self.cardinality);
+        c <= Self::mask(self.width) && self.stride.0.is_odd()
     }
 
-    pub fn last(&self) -> I {
-        if self.cardinality <= I::zero() {
+    pub fn last(&self) -> Wrapping<i64> {
+        if self.cardinality <= Wrapping(0i64) {
             unreachable!()
         } else {
-            self.base + self.stride * (self.cardinality - I::one())
+            self.base + self.stride * (self.cardinality - Wrapping(1))
         }
     }
 
     // Arithmetic negation
-    fn minus(a: &Clp<I>) -> Clp<I> {
+    fn minus(a: &Clp) -> Clp {
         if a.is_bottom() {
             a.clone()
         } else {
-            Clp::<I>{
+            Clp{
                 width: a.width,
-                base: (I::zero() - I::one()) * a.last(),
+                base: (Wrapping(0i64) - Wrapping(1i64)) * a.last(),
                 stride: a.stride,
                 cardinality: a.cardinality
             }
@@ -918,11 +789,11 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
     }
 
     // Logic (bitwise) negation
-    fn negate(a: &Clp<I>) -> Clp<I> {
+    fn negate(a: &Clp) -> Clp {
         if a.is_bottom() {
             a.clone()
         } else {
-            Clp::<I>{
+            Clp{
                 width: a.width,
                 base: a.last() ^ Self::mask(a.width),
                 stride: a.stride,
@@ -931,95 +802,126 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
         }
     }
 
-    fn mask(w: usize) -> I {
-        let mut ret = I::one();
+    fn mask(w: usize) -> Wrapping<i64> {
+        let mut ret = Wrapping(1i64);
 
         for _ in 1..w {
             ret = ret << 1;
-            ret = ret | I::one();
+            ret = ret | Wrapping(1i64);
         }
 
         ret
     }
 
-    fn closest_element(c: &Clp<I>, l: &I) -> (I,I,I,I,I,I) {
-        let w = Self::mask(c.width) + I::one();
+    fn modulus(a: Wrapping<i64>, m: Wrapping<i64>) -> Wrapping<i64> {
+        ((a % m) + m) % m
+    }
 
-        if c.cardinality == I::one() {
-            let z = I::zero();
-            return (z,z,z,w,w,c.base - *l);
+    pub fn closest_element(c_: &Clp, l: &Wrapping<i64>) -> (Wrapping<i64>,Wrapping<i64>,Wrapping<i64>,Wrapping<i64>,Wrapping<i64>,Wrapping<i64>) {
+        let c = Self::canonize(c_);
+        let modu = Self::mask(c.width) + Wrapping(1);
+
+        if c.cardinality == Wrapping(1i64) {
+            let z = Wrapping(0i64);
+            return (z,z,z,modu,modu,Self::modulus(c.base - *l,modu));
         }
 
-        let mut ia = I::one();
-        let mut ib = I::one();
+        let mut ia = Wrapping(1i64);
+        let mut ib = Wrapping(1i64);
         let mut alpha = c.stride;
-        let mut beta = w - c.stride;
-        let (mut ic,mut gamma) = if (c.base - *l) % w < (c.base + c.stride - *l) % w {
-            (I::zero(),(c.base - *l) % w)
+        let mut beta = modu - c.stride;
+        let (mut ic,mut gamma) = if Self::modulus(c.base - *l,modu) < Self::modulus(c.base + c.stride - *l,modu) {
+            (Wrapping(0i64),Self::modulus(c.base - *l,modu))
         } else {
-            (I::one(),(c.base + c.stride - *l) % w)
+            (Wrapping(1i64),Self::modulus(c.base + c.stride - *l,modu))
         };
 
         while ia + ib < c.cardinality {
+            assert!(gamma.0 <= cmp::min(alpha.0,beta.0));
+
             if alpha < beta {
+                assert!(gamma < beta);
+
                 let kk = {
-                    let t = gamma - beta;
-                    if t % alpha == I::zero() {
-                        -t / alpha
+                    let t = -gamma - beta;
+                    if t % alpha == Wrapping(0i64) {
+                        t / alpha
                     } else {
-                        -t / alpha + I::one()
+                        t / alpha + Wrapping(1i64)
                     }
                 };
 
-                if kk <= (c.cardinality - I::one() - (ic + ib)) / ia && -beta + kk * alpha < I::zero() {
-                    ic = ic + ib + kk* ia;
+                if kk <= (c.cardinality - Wrapping(1i64) - (ic + ib)) / ia && -beta + kk * alpha < Wrapping(0i64) {
+                    ic = ic + ib + kk * ia;
                     gamma = gamma - beta + kk * alpha;
+
+                    assert!(gamma.0 >= 0);
                 }
 
-                let k = cmp::min((beta - I::one()) / alpha,(c.cardinality - I::one() - ib) / ia);
+                let k = cmp::min((beta - Wrapping(1i64)) / alpha,(c.cardinality - Wrapping(1i64) - ib) / ia);
                 ib = ib + k * ia;
                 beta = beta - k * alpha;
             } else {
-                let kk = cmp::min(gamma / beta,(c.cardinality - I::one() - ic) / ib);
+                let kk = cmp::min(gamma / beta,(c.cardinality - Wrapping(1i64) - ic) / ib);
                 ic = ic + kk * ib;
                 gamma = gamma - kk * beta;
-                let k = cmp::min((alpha - I::one()) / beta,(c.cardinality - I::one() - ia) / ib);
-                ia = ia + k * ia;
+                let k = cmp::min((alpha - Wrapping(1i64)) / beta,(c.cardinality - Wrapping(1i64) - ia) / ib);
+                ia = ia + k * ib;
                 alpha = alpha - k * beta;
             }
         }
 
+        println!("Algorithm2(c = {:?}, l = {}): ia = {:?}, ib = {:?}, ic = {:?}, alpha = {:?}, beta = {:?}, gamma = {:?}",c,l,ia,ib,ic,alpha,beta,gamma);
+        assert!(alpha + beta > gamma && gamma >= Wrapping(0));
+        assert!(ia.0 >= 0 && ia < c.cardinality);
+        assert!(ib.0 >= 0 && ib < c.cardinality);
+        assert!(ic.0 >= 0 && ic < c.cardinality);
+
         (ia,ib,ic,alpha,beta,gamma)
     }
 
-    fn unsigned_minmax(a: &Clp<I>) -> (I,I) {
-        let (_,_,min_idx,_,_,_) = Self::closest_element(a,&I::zero());
-        let msk = Self::mask(a.width);
+    fn unsigned_minmax(a: &Clp) -> (Wrapping<i64>,Wrapping<i64>) {
+        let (ia,ib,min_idx,_,_,_) = Self::closest_element(a,&Wrapping(0i64));
+        let modu = Self::mask(a.width) + Wrapping(1);
+        fn pred(i: Wrapping<i64>,ia: Wrapping<i64>, ib: Wrapping<i64>, n: Wrapping<i64>) -> Wrapping<i64>{
+            if i < n - ib {
+                i + ib
+            } else if n - ib <= i && i < ia {
+                i - ia + ib
+            } else {
+                assert!(ia <= i);
+                i - ia
+            }
+        }
+        let max_idx = pred(min_idx,ia,ib,a.cardinality);
 
-        ((a.base + min_idx * a.stride) & msk,
-         (a.base + ((min_idx - I::one()) % a.cardinality) * a.stride) & msk)
+        assert!(min_idx < a.cardinality);
+        assert!(max_idx < a.cardinality);
+
+        (Self::modulus(a.base + min_idx * a.stride,modu),
+         Self::modulus(a.base + max_idx * a.stride,modu))
     }
 
-    fn signed_minmax(a: &Clp<I>) -> (I,I) {
-        let l = -(I::one() << (a.width - 2));
+    fn signed_minmax(a: &Clp) -> (Wrapping<i64>,Wrapping<i64>) {
+        let l = -(Wrapping(1i64) << (a.width - 2));
         let (_,_,min_idx,_,_,_) = Self::closest_element(&a,&l);
         let msk = Self::mask(a.width);
         let half_msk = msk >> 1;
         let min = (a.base + min_idx * a.stride) & msk;
-        let max = (a.base + ((min_idx - I::one()) % a.cardinality) * a.stride) & msk;
+        let max = (a.base + Self::modulus(min_idx - Wrapping(1i64),a.cardinality) * a.stride) & msk;
 
         (if min <= half_msk { min } else { min - msk },
          if max <= half_msk { max } else { max - msk })
     }
 
-    fn intersection(a: &Clp<I>, b: &Clp<I>) -> Clp<I> {
+    fn intersection(a: &Clp, b: &Clp) -> Clp {
         if a.is_bottom() { return a.clone() }
         if b.is_bottom() { return b.clone() }
 
-        let (d,s) = Self::eea(&a.stride,&(Self::mask(a.width) + I::one()));
+        let (d,s) = Self::eea(&a.stride,&(Self::mask(a.width) + Wrapping(1i64)));
         let (e,t) = Self::eea(&b.stride,&d);
-        let j0 = (t * (a.base - b.base) / e) % (d / e);
-        let i = Clp::<I>{
+        let j0 = Self::modulus(t * (a.base - b.base) / e,d / e);
+        let i = Clp{
             width: a.width - cmp::max(2,Self::most_significant_bit(&d)) as usize - 1,
             base: s * (b.base - a.base * b.stride * j0) / d,
             stride: b.stride * s / e,
@@ -1027,130 +929,137 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
         };
         let (i0,i1) = Self::unsigned_minmax(&i);
         
-        if e % (a.base - b.base) != I::zero() ||
+        if e % (a.base - b.base) != Wrapping(0i64) ||
            j0 >= b.cardinality ||
            i0 >= a.cardinality {
-            Clp::<I>{
+            Clp{
                 width: a.width,
-                base: I::zero(),
-                stride: I::zero(),
-                cardinality: I::zero(),
+                base: Wrapping(0i64),
+                stride: Wrapping(0i64),
+                cardinality: Wrapping(0i64),
             }
         } else {
             let (_,_,_,alpha,beta,_) = Self::closest_element(&i,&i.base);
-            let stride = a.stride * gcd(gcd(alpha,beta),alpha + beta);
+            let stride = a.stride * Wrapping(gcd(gcd(alpha.0,beta.0),(alpha + beta).0));
             
-            Clp::<I>{
+            Clp{
                 width: a.width,
                 base: a.base + a.stride * i0,
                 stride: stride,
-                cardinality: ((a.base + a.stride * i1) / stride) + I::one(),
+                cardinality: ((a.base + a.stride * i1) / stride) + Wrapping(1i64),
             }
         }
     }
 
-    pub fn unsigned_progression(_a: &Clp<I>) -> Vec<Clp<I>> {
+    fn progression(_a: &Clp, split_pnt: Wrapping<i64>, signed: bool) -> Vec<Clp> {
         let a = Self::canonize(_a);
-        let mut i = I::zero();
-        let mut j = I::zero();
-        let msk = Self::mask(a.width);
-        let split_pnt = msk + I::one();
+        let mask = Self::mask(a.width);
+        let modul = mask + Wrapping(1);
+        let half_modul = modul >> 1;
         let mut ret = vec![];
 
-        while i < a.cardinality {
-            let first = a.base + (i * a.stride);
-            let c = cmp::max(I::zero(),a.cardinality);
-            let max = a.base + (c - I::one()) * a.stride;
-            let last = cmp::min(max,split_pnt * (j + I::one()));
-            let n = (last - first) / a.stride + I::one();
+        println!("canon: {:?}",a);
 
-            if n <= I::zero() { break; }
+        if a.cardinality > Wrapping(0) {
+            let mut stride = if a.stride != Wrapping(0) { a.stride } else { Wrapping(1) };
+            let mut cur = Wrapping(0);
 
-            ret.push(Clp::<I>{
-                width: a.width,
-                base: first - (j * split_pnt),
-                stride: a.stride,
-                cardinality: n,
-            });
+            if stride < Wrapping(0) && !signed {
+                stride = stride & mask;
+            }
 
-            i = i + n;
-            j = j + I::one();
+            while cur < a.cardinality {
+                let mut base = a.base + cur * a.stride;
+
+                if signed && (base & half_modul) != Wrapping(0) {
+                    base = (base - modul) % modul;
+                } else {
+                    base = base & mask;
+                }
+
+                let len = ((split_pnt - base) & mask) / stride + Wrapping(1);
+                
+                println!("cur: {:?}, len: {:?}, base: {:?}, rest: {:?}",cur,len,base,a.cardinality - cur);
+
+                ret.push(Clp{
+                    width: a.width,
+                    base: base,
+                    stride: a.stride,
+                    cardinality: cmp::min(len,a.cardinality - cur),
+                });
+
+                cur += len;
+            }
+        } else {
+            if signed {
+                ret.push(a);
+            } else {
+                ret.push(Clp{
+                    width: a.width,
+                    base: a.base & mask,
+                    stride: a.stride,
+                    cardinality: a.cardinality,
+                })
+            }
         }
 
-        ret
+        return ret;
     }
 
-    pub fn signed_progression(_a: &Clp<I>) -> Vec<Clp<I>> {
-        let a = Self::canonize(_a);
-        let mut i = I::zero();
-        let mut j = I::zero();
-        let span = Self::mask(a.width) + I::one();
-        let split_pnt = span / (I::one() + I::one());
-        let mut ret = vec![];
-
-        while i < a.cardinality {
-            let first = a.base + i * a.stride - j * span;
-            let c = cmp::max(I::zero(),a.cardinality);
-            let max = a.base + (c - I::one()) * a.stride - j * span;
-            let last = cmp::min(max,split_pnt * (j + I::one()));
-            let n = (last - first) / a.stride + I::one();
-
-            if n <= I::zero() { break; }
-
-            ret.push(Clp::<I>{
-                width: a.width,
-                base: first,
-                stride: a.stride,
-                cardinality: n,
-            });
-
-            i = i + n;
-            j = j + I::one();
-        }
-
-        ret
+    pub fn unsigned_progression(a: &Clp) -> Vec<Clp> {
+        let split_pnt = Self::mask(a.width);
+        Self::progression(a,split_pnt,false)
     }
 
-    pub fn union(_a: &Clp<I>, _b: &Clp<I>) -> Clp<I> {
+    pub fn signed_progression(a: &Clp) -> Vec<Clp> {
+        let span = Self::mask(a.width);
+        Self::progression(a,span >> 1,true)
+    }
+    
+    pub fn union(_a: &Clp, _b: &Clp) -> Clp {
         assert_eq!(_a.width, _b.width);
 
-        let a = Clp::<I>::canonize(_a);
-        let b = Clp::<I>::canonize(_b);
+        let a = Clp::canonize(_a);
+        let b = Clp::canonize(_b);
 
         if a.is_bottom() { return b; } else if b.is_bottom() { return a; }
 
-        if a.cardinality == I::one() && b.cardinality == I::one() {
-            return Clp::<I>{
+        if a.cardinality == Wrapping(1) && b.cardinality == Wrapping(1) {
+            return Clp{
                 width: a.width,
                 base: cmp::min(a.base,b.base),
-                stride: abs(a.base - b.base),
-                cardinality: I::one() + I::one(),
+                stride: Wrapping(abs((a.base - b.base).0)),
+                cardinality: Wrapping(2),
             };
         }
 
-        fn _union<
-            I: Integer + Signed + Decodable + Encodable + Clone + Copy + Debug + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I>>(a: &Clp<I>, b: &Clp<I>) -> Clp<I> {
-            let ca = cmp::max(I::zero(),a.cardinality);
-            let cb = cmp::max(I::zero(),b.cardinality);
-            let la = a.base + a.stride * (ca - I::one());
-            let lb = b.base + b.stride * (cb - I::one());
+        fn _union(a: &Clp, b: &Clp) -> Clp {
+            let ca = cmp::max(Wrapping(0),a.cardinality);
+            let cb = cmp::max(Wrapping(0),b.cardinality);
+            let la = a.base + a.stride * (ca - Wrapping(1));
+            let lb = b.base + b.stride * (cb - Wrapping(1));
             let base = cmp::min(a.base,b.base);
             let t1 = cmp::max(la,lb);
-            let s = gcd(gcd(a.stride,b.stride),abs(a.base - b.base));
+            let s = Wrapping(gcd(gcd(a.stride.0,b.stride.0),abs((a.base - b.base).0)));
+            let cardinality = if s != Wrapping(0) {
+                cmp::max(Wrapping(0),(((t1 - base) / s) + Wrapping(1)))
+            } else {
+                Wrapping(1)
+            };
 
-            Clp::<I>{
+            Clp{
                 width: a.width,
                 base: base,
                 stride: s,
-                cardinality: cmp::max(I::zero(),(((t1 - base) / s) + I::one())),
+                cardinality: cardinality,
             }
         }
 
-        let w = Self::mask(a.width) + I::one();
-        let mut ret: Option<Clp<I>> = None;
-        let mut m = I::zero() - I::one();
+        let w = Self::mask(a.width) + Wrapping(1);
+        let mut ret: Option<Clp> = None;
+        let mut m = Wrapping(-1);
         for _ in -1..2 {
-            let x = _union(&a,&Clp::<I>{
+            let x = _union(&a,&Clp{
                 width: b.width,
                 base: b.base + w * m,
                 stride: b.stride,
@@ -1161,63 +1070,63 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 ret = Some(x)
             }
 
-            m = m + I::one();
+            m = m + Wrapping(1);
         }
 
         ret.unwrap()
     }
 
-    pub fn canonize(a: &Clp<I>) -> Clp<I> {
+    pub fn canonize(a: &Clp) -> Clp {
         let msk = Self::mask(a.width);
-        let w = msk + I::one();
+        let w = msk + Wrapping(1i64);
         match a {
-            &Clp::<I>{ width, cardinality: ref c,.. } if *c == I::zero() =>
-                Clp::<I>{
+            &Clp{ width, cardinality: ref c,.. } if *c == Wrapping(0i64) =>
+                Clp{
                     width: width,
-                    base: I::zero(),
-                    stride: I::zero(),
-                    cardinality: I::zero(),
+                    base: Wrapping(0i64),
+                    stride: Wrapping(0i64),
+                    cardinality: Wrapping(0i64),
                 },
-            &Clp::<I>{ width,ref base, cardinality: ref c,.. } if *c == I::one() =>
-                Clp::<I>{
+            &Clp{ width,ref base, cardinality: ref c,.. } if *c == Wrapping(1i64) =>
+                Clp{
                     width: width,
                     base: *base & msk,
-                    stride: I::zero(),
-                    cardinality: I::one(),
+                    stride: Wrapping(0i64),
+                    cardinality: Wrapping(1i64),
                 },
-            &Clp::<I>{ width, base, stride, cardinality } => {
-                let k = if stride == I::zero() { I::one() } else { lcm(w,stride) / stride };
-                let c = cmp::max(I::zero(),cardinality);
+            &Clp{ width, base, stride, cardinality } => {
+                let k = if stride == Wrapping(0i64) { Wrapping(1i64) } else { Wrapping(lcm(w.0,stride.0)) / stride };
+                let c = cmp::max(Wrapping(0i64),cardinality);
 
-                if c >= k && k >= I::one() + I::one() {
-                    let s = gcd(stride,w) & msk;
+                if c >= k && k >= Wrapping(2i64) {
+                    let s = Wrapping(gcd(stride.0,w.0)) & msk;
 
-                    Clp::<I>{
+                    Clp{
                         width: width,
-                        base: base % s,
+                        base: Self::modulus(base,s),
                         stride: s,
-                        cardinality: cmp::max(I::zero(),k),
+                        cardinality: cmp::max(Wrapping(0i64),k),
                     }
-                } else if c == k - I::one() && c >= I::one() + I::one() {
-                    let s = gcd(stride,w) & msk;
+                } else if c == k - Wrapping(1i64) && c >= Wrapping(2i64) {
+                    let s = Wrapping(gcd(stride.0,w.0)) & msk;
 
-                    Clp::<I>{
+                    Clp{
                         width: width,
                         base: (base + (c * stride) + s) & msk,
-                        stride: gcd(stride,w) & msk,
+                        stride: s,
                         cardinality: cardinality,
                     }
                 } else {
                     if stride & msk < w >> 1 {
-                        Clp::<I>{
+                        Clp{
                             width: width,
                             base: base & msk,
                             stride: stride & msk,
                             cardinality: cardinality,
                         }
                     } else {
-                        let b = (c - I::one()) * stride + base;
-                        Clp::<I>{
+                        let b = (c - Wrapping(1i64)) * stride + base;
+                        Clp{
                             width: width,
                             base: b & msk,
                             stride: (w - stride) & msk,
@@ -1230,22 +1139,37 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
     }
 
     fn execute(pp: &ProgramPoint, op: &Operation<Self>) -> Self {
-        fn permute<
-            I: Integer + FromPrimitive + Signed + Decodable + Encodable + Clone + Copy + Debug + Shr<I,Output=I> + Shl<I,Output=I> + Shr<usize,Output=I> + Shl<usize,Output=I> + BitOr<Output=I> + BitAnd<Output=I> + BitXor<Output=I>
-            >(a: Vec<Clp<I>>, b: Vec<Clp<I>>, f: &Fn(Clp<I>,Clp<I>) -> Clp<I>) -> Clp<I> {
-            let mut ret: Option<Clp<I>> = None;
-            for x in a.iter() {
-                for y in b.iter() {
-                    let c = f(x.clone(),y.clone());
-                    if let Some(ref mut t) = ret {
-                        *t = Clp::<I>::union(t,&c);
-                    } else {
-                        ret = Some(c);
+        fn permute(w: usize, a: Vec<Clp>, b: Vec<Clp>, f: &Fn(Clp,Clp) -> Clp) -> Clp {
+            if !a.is_empty() && !b.is_empty() {
+                let mut ret: Option<Clp> = None;
+                for x in a.iter() {
+                    for y in b.iter() {
+                        let c = f(x.clone(),y.clone());
+                        if let Some(ref mut t) = ret {
+                            print!("union {:?} and {:?} to ",t,c);
+                            *t = Clp::union(t,&c);
+                            println!("{:?}",t);
+                        } else {
+                            println!("got {:?}",c);
+                            ret = Some(c);
+                        }
                     }
                 }
-            }
 
-            ret.unwrap()
+                ret.unwrap_or(Clp{
+                    width: a[0].width,
+                    base: Wrapping(0),
+                    stride: Wrapping(1),
+                    cardinality: Clp::mask(a[0].width) + Wrapping(1),
+                })
+            } else {
+                Clp{
+                    width: w,
+                    base: Wrapping(0),
+                    stride: Wrapping(0),
+                    cardinality: Wrapping(0),
+                }
+            }
         }
 
         match *op {
@@ -1256,118 +1180,141 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 let a_aps = Self::unsigned_progression(a);
                 let b_aps = Self::unsigned_progression(b);
 
-                permute(a_aps,b_aps,&|a,b| {
-                    if a.cardinality == I::one() && b.cardinality == I::one() {
-                        Clp::<I>{
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    println!("{:?} & {:?}",a,b);
+
+                    if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
+                        Clp{
                             width: a.width,
                             base: a.base & b.base,
-                            stride: I::zero(),
-                            cardinality: I::one(),
+                            stride: Wrapping(0i64),
+                            cardinality: Wrapping(1i64),
                         }
-                    } else if a.cardinality == I::one() && b.cardinality == I::one() + I::one() {
-                        Clp::<I>{
+                    } else if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(2i64){
+                        Clp{
                             width: a.width,
                             base: a.base & b.base,
                             stride: (a.base & b.last()) - (a.base & b.base),
-                            cardinality: I::one() + I::one(),
+                            cardinality: Wrapping(1i64) + Wrapping(1i64),
                         }
-                    } else if a.cardinality == I::one() + I::one() && b.cardinality == I::one() {
-                        Clp::<I>{
+                    } else if a.cardinality == Wrapping(2i64) && b.cardinality == Wrapping(1i64) {
+                        Clp{
                             width: a.width,
                             base: a.base & b.base,
                             stride: (a.last() & b.base) - (a.base & b.base),
-                            cardinality: I::one() + I::one(),
+                            cardinality: Wrapping(2i64),
                         }
                     } else {
-                        let (l1, u1) = if a.cardinality == I::one() {
+                        let (l1, u1) = if a.cardinality == Wrapping(1i64) {
                             (a.width as isize,-1)
                         } else {
-                            (Clp::<I>::trailing_zeros(&a.stride),Clp::<I>::most_significant_bit(&(a.base ^ a.last())))
+                            (Clp::trailing_zeros(&a.stride),Clp::most_significant_bit(&(a.base ^ a.last())) - 1)
                         };
-                        let (l2, u2) = if b.cardinality == I::one() {
+                        let (l2, u2) = if b.cardinality == Wrapping(1i64) {
                             (b.width as isize,-1)
                         } else {
-                            (Clp::<I>::trailing_zeros(&b.stride),Clp::<I>::most_significant_bit(&(b.base ^ b.last())))
+                            (Clp::trailing_zeros(&b.stride),Clp::most_significant_bit(&(b.base ^ b.last())) - 1)
                         };
+
+                        println!("l1: {:?}, u1: {:?}, l2: {:?}, u2: {:?}",l1,u1,l2,u2);
 
                         let l = if l1 < l2 {
                             let msk = Self::mask((l2 - l1) as usize) << l1 as usize;
                             let v = b.base & msk;
-                            if v == I::zero() { l2 } else { Clp::<I>::trailing_zeros(&v) }
+                            if v == Wrapping(0i64) { l2 } else { Clp::trailing_zeros(&v) }
                         } else if l1 > l2 {
                             let msk = Self::mask((l1 - l2) as usize) << l2 as usize;
-                            let v = b.base & msk;
-                            if v == I::zero() { l1 } else { Clp::<I>::trailing_zeros(&v) }
+                            let v = a.base & msk;
+                            if v == Wrapping(0i64) { l1 } else { Clp::trailing_zeros(&v) }
                         } else {
                             assert_eq!(l1, l2);
                             l1
                         };
 
                         let u = if u1 < u2 {
-                            let msk = Self::mask((u2 - u1) as usize) << u1 as usize;
-                            let v = b.base & msk;
-                            if v == I::zero() { u2 } else { Clp::<I>::trailing_zeros(&v) }
+                            let msk = Self::mask((u2 - u1) as usize) << (u1 + 1) as usize;
+                            let v = a.base & msk;
+                            if v == Wrapping(0i64) { u1 } else { Clp::most_significant_bit(&v) - 1 }
                         } else if u1 > u2 {
-                            let msk = Self::mask((u1 - u2) as usize) << u2 as usize;
+                            let msk = Self::mask((u1 - u2) as usize) << (u2 + 1) as usize;
                             let v = b.base & msk;
-                            if v == I::zero() { u1 } else { Clp::<I>::trailing_zeros(&v) }
+                            if v == Wrapping(0i64) { u2 } else { Clp::most_significant_bit(&v) - 1 }
                         } else {
                             assert_eq!(u1, u2);
                             u1
                         };
 
+                        println!("l: {:?}, u: {:?}",l,u);
+
                         if l <= u {
-                            let uu = if u1 > u2 && u == u1 {
-                                let mut r = u1;
-                                for i in u1 as usize..b.width {
-                                    if (b.base >> i) & I::one() == I::one() {
-                                        r = i as isize;
-                                    } else {
-                                        break;
+                            let uu = if u1 > u2 {
+                                if u == u1 {
+                                    let mut r = u1;
+                                    for i in u1 as usize..b.width {
+                                        if (b.base >> i) & Wrapping(1i64) == Wrapping(1i64) {
+                                            r = i as isize;
+                                        } else {
+                                            break;
+                                        }
                                     }
+                                    Some(r)
+                                } else {
+                                    Some(u + 1)
                                 }
-                                r
-                            } else if u1 < u2 && u == u2 {
-                                let mut r = u2;
-                                for i in u2 as usize..a.width {
-                                    if (a.base >> i) & I::one() == I::one() {
-                                        r = i as isize;
-                                    } else {
-                                        break;
+                            } else if u1 < u2 {
+                                if u == u2 {
+                                    let mut r = u2;
+                                    for i in u2 as usize..a.width {
+                                        if (a.base >> i) & Wrapping(1i64) == Wrapping(1i64) {
+                                            r = i as isize;
+                                        } else {
+                                            break;
+                                        }
                                     }
+                                    Some(r)
+                                } else {
+                                    Some(u + 1)
                                 }
-                                r
                             } else {
-                                u + 1
+                                None
                             };
 
-                            let stride = if u1 > u2 && u == u1 && uu == l {
-                                cmp::max(a.stride,I::one() << l as usize)
-                            } else if u2 > u1 && u == u2 && uu == l {
-                                cmp::max(b.stride,I::one() << l as usize)
+                            println!("u': {:?}",uu);
+
+                            let stride = if u1 > u2 && u == u1 && uu == Some(l) {
+                                cmp::max(a.stride,Wrapping(1i64) << l as usize)
+                            } else if u2 > u1 && u == u2 && uu == Some(l) {
+                                cmp::max(b.stride,Wrapping(1i64) << l as usize)
                             } else {
-                                I::one() << l as usize
+                                Wrapping(1i64) << l as usize
                             };
-                            let m = if l < uu { Self::mask((uu - l) as usize) << l as usize } else { Self::mask(a.width) };
-                            let low = (a.base & b.base) & m;
+                            let m = if uu.is_some() && l < uu.unwrap() {
+                                Self::mask((uu.unwrap() - l) as usize) << l as usize
+                            } else {
+                                Self::mask(a.width)
+                            };
+
+                            println!("m: {:b}",m.0);
+
+                            let low = (a.base & b.base) & !m;
                             let up = cmp::min((a.last() & b.last()) | m,cmp::min(a.last(),b.last()));
                             let t = low - (a.base & b.base);
-                            let o = if t % stride > I::zero() { I::one() } else { I::zero() };
+                            let o = if Self::modulus(t,stride) > Wrapping(0i64) { Wrapping(1i64) } else { Wrapping(0i64) };
                             let base = (a.base & b.base) + stride * ((t / stride) + o);
-                            let cardinality = (up - base) / stride + I::one();
+                            let cardinality = (up - base) / stride + Wrapping(1i64);
 
-                            Clp::<I>{
+                            Clp{
                                 width: a.width,
                                 base: base,
                                 stride: stride,
                                 cardinality: cardinality,
                             }
                         } else {
-                            Clp::<I>{
+                            Clp{
                                 width: a.width,
                                 base: a.base & b.base,
-                                stride: I::zero(),
-                                cardinality: I::one(),
+                                stride: Wrapping(0i64),
+                                cardinality: Wrapping(1i64),
                             }
                         }
                     }
@@ -1392,19 +1339,17 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
 
                 let base = a.base + b.base;
 
-                if a.cardinality == I::one() && b.cardinality == I::one() {
+                if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
                     return Clp{
                         width: a.width,
                         base: base,
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 }
 
-                let stride = gcd(a.stride,b.stride);
-                let a_last = a.base + (a.cardinality - I::one()) * a.stride;
-                let b_last = b.base + (b.cardinality - I::one()) * b.stride;
-                let cardinality = (a_last + b_last - base) / stride + I::one();
+                let stride = Wrapping(gcd(a.stride.0,b.stride.0));
+                let cardinality = (a.last() + b.last() - base) / stride + Wrapping(1i64);
 
                 Clp{
                     width: a.width,
@@ -1424,23 +1369,24 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 let a_aps = Self::unsigned_progression(a);
                 let b_aps = Self::unsigned_progression(b);
 
-                permute(a_aps,b_aps,&|a,b| {
+                permute(a.width,a_aps,b_aps,&|a,b| {
                     let base = a.base * b.base;
-                    if a.cardinality == I::one() || b.cardinality == I::one() {
-                        Clp::<I>{
+                    if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
+                        Clp{
                             width: w,
                             base: base,
-                            stride: I::zero(),
-                            cardinality: I::one()
+                            stride: Wrapping(0i64),
+                            cardinality: Wrapping(1i64)
                         }
                     } else {
-                        let stride = gcd(gcd(
-                                a.base * b.stride,
-                                b.base * a.stride),
-                                a.stride * b.stride);
-                        let cardinality = (a.last() * b.last() - base) / stride + I::one();
+                        let mut stride = Wrapping(gcd(gcd(
+                                (a.base * b.stride).0,
+                                (b.base * a.stride).0),
+                                (a.stride * b.stride).0));
+                        if stride.0 == 0 { stride = Wrapping(1i64) };
+                        let cardinality = (a.last() * b.last() - base) / stride + Wrapping(1i64);
 
-                        Clp::<I>{
+                        Clp{
                             width: w,
                             base: base,
                             stride: stride,
@@ -1452,98 +1398,95 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
             Operation::DivideSigned(ref a,ref b) => {
                 if a.is_bottom() { return a.clone(); }
                 if b.is_bottom() { return b.clone(); }
-                if b.base == I::zero() {
-                    return Clp::<I>{
+                if (b.stride.0 != 0 && (b.base % b.stride).0 == 0) || b.base.0 == 0 {
+                    return Clp{
                         width: b.width,
-                        base: I::zero(),
-                        stride: I::one(),
-                        cardinality: Clp::<I>::mask(b.width),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Clp::mask(b.width) + Wrapping(1i64),
                     };
                 }
 
-                let modu = Self::mask(a.width) + I::one();
-                if (modu - b.base) % b.stride == I::zero() {
-                    if (modu - b.base) - b.stride < b.cardinality {
-                        return Clp::<I>{
-                            width: b.width,
-                            base: I::zero(),
-                            stride: I::one(),
-                            cardinality: Clp::<I>::mask(b.width),
-                        };
-                    }
-                }
-                
                 let a_aps = Self::signed_progression(a);
                 let mut b_aps = vec![];
 
                 for b in Self::signed_progression(b) {
-                    if b.base < I::zero() && b.last() >= I::zero() {
-                        let c = ((I::zero() - I::one()) * b.base) / b.stride;
-                        b_aps.push(Clp::<I>{
+                    if b.base < Wrapping(0) && b.last() >= Wrapping(0) {
+                        let c = -b.base / b.stride;
+                        let c1 = if -b.base % b.stride == Wrapping(0) { Wrapping(0) } else { Wrapping(1) };
+                        b_aps.push(Clp{
                             width: b.width,
                             base: b.base,
                             stride: b.stride,
-                            cardinality: c
+                            cardinality: c + c1
                         });
-                        b_aps.push(Clp::<I>{
-                            width: b.width,
-                            base: b.base + c * b.stride,
-                            stride: b.stride,
-                            cardinality: b.cardinality - c
-                        });
+
+                        if c + c1 < b.cardinality {
+                            b_aps.push(Clp{
+                                width: b.width,
+                                base: b.base + (c + c1) * b.stride,
+                                stride: b.stride,
+                                cardinality: b.cardinality - c - c1
+                            });
+                        }
                     } else {
                         b_aps.push(b);
                     }
                 }
 
-                permute(a_aps,b_aps,&|a,b| {
-                    if a.cardinality == I::one() && b.cardinality == I::one() {
-                        return Clp::<I>{
+                let m = Self::mask(a.width) + Wrapping(1);
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
+                        return Clp{
                             width: a.width,
                             base: a.base / b.base,
-                            stride: I::zero(),
-                            cardinality: I::one(),
+                            stride: Wrapping(0i64),
+                            cardinality: Wrapping(1i64),
                         };
                     }
 
-
                     let base = cmp::min(a.base / b.base,
-                        cmp::min(a.base / b.last(),
-                        cmp::min(a.last() / b.base,
-                        a.last() / b.last())));
+                               cmp::min(a.base / b.last() % m,
+                               cmp::min(a.last() % m / b.base,
+                                        a.last() % m / b.last() % m)));
                     let d = cmp::max(a.base / b.base,
-                        cmp::max(a.base / b.last(),
-                        cmp::max(a.last() / b.base,
-                        a.last() / b.last())));
-                    let stride = if b.cardinality <= I::from_usize(10).unwrap() {
-                            let mut c1 = true;
-                            let mut c2 = true;
-                            let mut r = None;
-                            let mut i = I::zero();
+                            cmp::max(a.base / b.last() % m,
+                            cmp::max(a.last() % m / b.base,
+                                     a.last() % m / b.last() % m)));
+                    let stride = if b.cardinality <= Wrapping(10i64) {
+                        let mut c1 = true;
+                        let mut c2 = true;
+                        let mut r = None;
+                        let mut i = Wrapping(0i64);
+                        let msk = Self::mask(a.width);
 
-                            while i < b.cardinality {
-                                let v = b.base + i * b.stride;
-                                let g = gcd(a.base / v - base,abs(a.stride / v));
+                        while i < b.cardinality {
+                            let v = b.base + i * b.stride & msk;
+                            let g = Wrapping(gcd((a.base / v - base).0,abs((a.stride / v).0)));
 
-                                c1 &= v.divides(&a.base) && v.divides(&a.stride);
-                                c2 &= v.divides(&a.stride);
+                            c1 &= a.base.0.is_multiple_of(&v.0) && a.stride.0.is_multiple_of(&v.0);
+                            c2 &= a.stride.0.is_multiple_of(&v.0);
 
-                                if r.is_none() { r = Some(g) } else { r = Some(gcd(g,r.unwrap())) }
+                            if r.is_none() { r = Some(g) } else { r = Some(Wrapping(gcd(g.0,r.unwrap().0))) }
 
-                                i = i + I::one();
-                            }
+                            i = i + Wrapping(1i64);
+                        }
 
-                            if c1 || c2 && (a.last() < I::zero() && a.base > I::zero()) && r.is_some() {
-                                r.unwrap()
-                            } else {
-                                I::one()
-                            }
+                        if c1 || c2 && (a.last() < Wrapping(0i64) && a.base > Wrapping(0i64)) && r.is_some() {
+                            r.unwrap()
                         } else {
-                            I::one()
-                        };
-                    let cardinality = (d - base) / stride + I::one();
-
-                    Clp::<I>{
+                            Wrapping(1i64)
+                        }
+                    } else {
+                        Wrapping(1i64)
+                    };
+                    let cardinality = if stride != Wrapping(0) {
+                        ((d - base) / stride) + Wrapping(1)
+                    } else {
+                        Wrapping(1)
+                    };
+                     
+                    Clp{
                         width: a.width,
                         base: base,
                         stride: stride,
@@ -1554,67 +1497,60 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
             Operation::DivideUnsigned(ref a,ref b) => {
                 if a.is_bottom() { return a.clone(); }
                 if b.is_bottom() { return b.clone(); }
-                if b.base == I::zero() {
-                    return Clp::<I>{
+                if (b.stride.0 != 0 && (b.base % b.stride).0 == 0) || b.base.0 == 0 {
+                    return Clp{
                         width: b.width,
-                        base: I::zero(),
-                        stride: I::one(),
-                        cardinality: Clp::<I>::mask(b.width),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Clp::mask(b.width) + Wrapping(1i64),
                     };
                 }
-
-                let modu = Self::mask(a.width) + I::one();
-                if (modu - b.base) % b.stride == I::zero() {
-                    if (modu - b.base) - b.stride < b.cardinality {
-                        return Clp::<I>{
-                            width: b.width,
-                            base: I::zero(),
-                            stride: I::one(),
-                            cardinality: Clp::<I>::mask(b.width),
-                        };
-                    }
-                }
                 
-                let a_aps = Self::signed_progression(a);
-                let b_aps = Self::signed_progression(a);
+                let a_aps = Self::unsigned_progression(a);
+                let b_aps = Self::unsigned_progression(b);
+                let msk = Self::mask(a.width);
 
-                permute(a_aps,b_aps,&|a,b| {
-                    if a.cardinality == I::one() && b.cardinality == I::one() {
-                        return Clp::<I>{
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
+                        return Clp{
                             width: a.width,
-                            base: a.base / b.base,
-                            stride: I::zero(),
-                            cardinality: I::one(),
+                            base: (a.base & msk) / (b.base & msk),
+                            stride: Wrapping(0i64),
+                            cardinality: Wrapping(1i64),
                         };
                     }
 
-                    let base = a.base / b.last();
-                    let stride = if b.cardinality <= I::from_usize(10).unwrap() {
-                            let mut c = true;
-                            let mut r = None;
-                            let mut i = I::zero();
+                    let base = (a.base & msk) / (b.last() & msk);
+                    let mut stride = if b.cardinality <= Wrapping(10i64) {
+                        let mut c = true;
+                        let mut r = None;
+                        let mut i = Wrapping(0i64);
 
-                            while i < b.cardinality {
-                                let v = b.base + i * b.stride;
-                                let g = gcd(a.base / v - base,a.stride / v);
+                        while i < b.cardinality {
+                            let v = b.base + i * b.stride;
+                            let g = Wrapping(gcd((a.base / v - base).0,(a.stride / v).0));
 
-                                c &= v.divides(&a.stride);
+                            c &= a.stride.0.is_multiple_of(&v.0);
 
-                                if r.is_none() { r = Some(g) } else { r = Some(gcd(g,r.unwrap())) }
-                                i = i + I::one();
-                            }
+                            if r.is_none() { r = Some(g) } else { r = Some(Wrapping(gcd(g.0,r.unwrap().0))) }
+                            i = i + Wrapping(1i64);
+                        }
 
-                            if c && r.is_some() {
-                                r.unwrap()
-                            } else {
-                                I::one()
-                            }
+                        if c && r.is_some() {
+                            r.unwrap()
                         } else {
-                            I::one()
-                        };
-                    let cardinality = (a.last() / b.base - base) / stride + I::one();
+                            Wrapping(1i64)
+                        }
+                    } else {
+                        Wrapping(1i64)
+                    };
+                    let cardinality = if stride != Wrapping(0) {
+                        ((((a.last() & msk) / (b.base & msk)) - base) / stride) + Wrapping(1i64)
+                    } else {
+                        Wrapping(1)
+                    };
 
-                    Clp::<I>{
+                    Clp{
                         width: a.width,
                         base: base,
                         stride: stride,
@@ -1623,29 +1559,46 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 })
             },
             Operation::Modulo(ref a,ref b) => {
+                if a.is_bottom() { return a.clone(); }
+                if b.is_bottom() { return b.clone(); }
+                if (b.stride.0 != 0 && (b.base % b.stride).0 == 0) || b.base.0 == 0 {
+                    return Clp{
+                        width: b.width,
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Clp::mask(b.width) + Wrapping(1i64),
+                    };
+                }
                 let a_aps = Self::signed_progression(a);
                 let mut b_aps = vec![];
 
                 for b in Self::signed_progression(b) {
-                    if b.base < I::zero() && b.last() >= I::zero() {
-                        let c = ((I::zero() - I::one()) * b.base) / b.stride;
-                        b_aps.push(Clp::<I>{
+                    if b.base < Wrapping(0) && b.last() >= Wrapping(0) {
+                        let c = -b.base / b.stride;
+                        let c1 = if -b.base % b.stride == Wrapping(0) { Wrapping(0) } else { Wrapping(1) };
+                        b_aps.push(Clp{
                             width: b.width,
                             base: b.base,
                             stride: b.stride,
-                            cardinality: c
+                            cardinality: c + c1
                         });
-                        b_aps.push(Clp::<I>{
-                            width: b.width,
-                            base: b.base + c * b.stride,
-                            stride: b.stride,
-                            cardinality: b.cardinality - c
-                        });
+
+                        if c + c1 < b.cardinality {
+                            b_aps.push(Clp{
+                                width: b.width,
+                                base: b.base + (c + c1) * b.stride,
+                                stride: b.stride,
+                                cardinality: b.cardinality - c - c1
+                            });
+                        }
                     } else {
                         b_aps.push(b);
                     }
                 }
-                permute(a_aps,b_aps,&|a,b| {
+
+                println!("perm: {:?} {:?}",a_aps,b_aps);
+
+                permute(a.width,a_aps,b_aps,&|a,b| {
                     let x = Clp::execute(pp,&Operation::DivideSigned(a.clone(),b.clone()));
                     let y = Clp::execute(pp,&Operation::Multiply(x,b.clone()));
                     Clp::execute(pp,&Operation::Subtract(a.clone(),y))
@@ -1656,39 +1609,41 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 if b.is_bottom() { return b.clone(); }
                 
                 let a_aps = Self::signed_progression(a);
-                let b_aps = Self::unsigned_progression(a);
+                let b_aps = Self::unsigned_progression(b);
 
-                permute(a_aps,b_aps,&|a,b| {
-                    if a.cardinality == I::one() && b.cardinality == I::one() {
-                        return Clp::<I>{
+                fn safe_shrs(a: &Wrapping<i64>, b: &Wrapping<i64>, w: usize) -> Wrapping<i64> {
+                    if *b < Wrapping(0) || *b >= Wrapping(w as i64) {
+                        if *a < Wrapping(0) { Wrapping(-1) } else { Wrapping(0) }
+                    } else {
+                        *a >> b.0 as usize
+                    }
+                }
+
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) {
+                        return Clp{
                             width: a.width,
-                            base: a.base >> b.base,
-                            stride: I::zero(),
-                            cardinality: I::one(),
+                            base: safe_shrs(&a.base,&b.base,a.width),
+                            stride: Wrapping(0i64),
+                            cardinality: Wrapping(1i64),
                         };
                     }
 
-                    let base = if a.base >= I::zero() {
-                        a.base >> b.last()
+                    let base = if a.base >= Wrapping(0) {
+                        safe_shrs(&a.base,&b.last(),a.width)
                     } else {
-                        a.base >> b.base
+                        safe_shrs(&a.base,&b.base,a.width)
                     };
-                    let msk = (I::one() << b.last()) - I::one();
-                    let d1 = a.stride & msk == I::zero();
-                    let d2 = a.base & msk == I::zero();
-                    let d3 = Clp::<I>::count_ones(a.base & msk) == b.last();
-                    let stride = if (b.cardinality == I::one() && d1) || (d1 && d2) || (d1 && d3) {
-                        gcd(a.stride >> b.last(),(a.base >> (b.last() - a.stride)) - (a.base >> b.last()))
+                    let stride = Wrapping(1);
+                    let cardinality = if a.base <= a.last() {
+                        let x = safe_shrs(&a.last(),&b.base,a.width);
+                        ((x - base) / stride) + Wrapping(1)
                     } else {
-                        I::one()
-                    };
-                    let cardinality = if a.base >= a.last() {
-                        (((a.last() >> b.base) - base) / stride) + I::one()
-                    } else {
-                        (((a.last() >> b.last()) - base) / stride) + I::one()
+                        let x = safe_shrs(&a.last(),&b.last(),a.width);
+                        ((x - base) / stride) + Wrapping(1)
                     };
 
-                    Clp::<I>{
+                    Clp{
                         width: a.width,
                         base: base,
                         stride: stride,
@@ -1701,31 +1656,38 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 if b.is_bottom() { return b.clone(); }
 
                 let a_aps = Self::unsigned_progression(a);
-                let b_aps = Self::unsigned_progression(a);
+                let b_aps = Self::unsigned_progression(b);
 
-                permute(a_aps,b_aps,&|a,b| {
-                    if a.cardinality == I::one() && b.cardinality == I::one() {
-                        return Clp::<I>{
+                fn safe_shru(a: &Wrapping<i64>, b: &Wrapping<i64>, w: usize) -> Wrapping<i64> {
+                    if *b < Wrapping(0) || *b >= Wrapping(w as i64) {
+                        Wrapping(0)
+                    } else {
+                        Wrapping((Wrapping(a.0 as u64) >> b.0 as usize).0 as i64)
+                    }
+                }
+
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    println!("{:?} >> {:?}",a,b);
+
+                    if a.cardinality == Wrapping(1) && b.cardinality == Wrapping(1) {
+                        return Clp{
                             width: a.width,
-                            base: a.base >> b.base,
-                            stride: I::zero(),
-                            cardinality: I::one(),
+                            base: safe_shru(&a.base,&b.base,a.width),
+                            stride: Wrapping(0),
+                            cardinality: Wrapping(1),
                         };
                     }
 
-                    let base = a.base >> b.last();
-                    let msk = (I::one() << b.last()) - I::one();
-                    let d1 = a.stride & msk == I::zero();
-                    let d2 = a.base & msk == I::zero();
-                    let d3 = Clp::<I>::count_ones(a.base & msk) == b.last();
-                    let stride = if (b.cardinality == I::one() && d1) || (d1 && d2) || (d1 && d3) {
-                        gcd(a.stride >> b.last(),(a.base >> (b.last() - a.stride)) - (a.base >> b.last()))
+                    let base = safe_shru(&a.base,&b.last(),a.width);
+                    let stride = Wrapping(1);
+                    let cardinality = if stride != Wrapping(0) {
+                        let last = safe_shru(&a.last(),&b.base,a.width);
+                        ((last - base) / stride) + Wrapping(1i64)
                     } else {
-                        I::one()
+                        Wrapping(1)
                     };
-                    let cardinality = (((a.last() >> b.base) - base) / stride) + I::one();
 
-                    Clp::<I>{
+                    Clp{
                         width: a.width,
                         base: base,
                         stride: stride,
@@ -1737,23 +1699,32 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 if a.is_bottom() { return a.clone(); }
                 if b.is_bottom() { return b.clone(); }
                 
-                let a_aps = vec![a.clone()];
-                let b_aps = Self::unsigned_progression(a);
+                let a_aps = vec![Self::canonize(a)];
+                let b_aps = Self::unsigned_progression(b);
+                let msk = Self::mask(a.width);
 
-                permute(a_aps,b_aps,&|a,b| {
-                    let base = a.base << b.base;
-                    let stride = if b.cardinality == I::one() {
-                        a.stride << b.base
+                permute(a.width,a_aps,b_aps,&|a,b| {
+                    let base = a.base << (b.base.0 as usize);
+                    let stride = if b.cardinality == Wrapping(1) {
+                        a.stride << (b.base.0 as usize)
                     } else {
-                        gcd(a.base,a.stride)
+                        Wrapping(gcd(a.base.0,a.stride.0))
                     };
-                    let cardinality = (((a.last() << b.last()) - base) / stride) + I::one();
+                    let cardinality = if stride != Wrapping(0) {
+                        (((((a.last()) << (b.last()).0 as usize) ) - base) / stride) + Wrapping(1)
+                    } else {
+                        Wrapping(1)
+                    };
 
-                    Clp::<I>{
+                    Clp{
                         width: a.width,
                         base: base,
-                        stride: stride,
-                        cardinality: cardinality
+                        stride: stride % (msk + Wrapping(1)),
+                        cardinality: if cardinality > Wrapping(0) {
+                            cmp::min(Wrapping(cardinality.0.abs()),msk + Wrapping(2))
+                        } else {
+                            msk + Wrapping(2)
+                        }
                     }
                 })
             },
@@ -1761,22 +1732,22 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
             Operation::LessOrEqualSigned(ref a,ref b) => {
                 let x = Clp::execute(pp,&Operation::LessSigned(a.clone(),b.clone()));
                 let y = Clp::execute(pp,&Operation::Equal(a.clone(),b.clone()));
-                Clp::execute(pp,&Operation::InclusiveOr(x,y))
+                Clp::execute(pp,&Operation::ExclusiveOr(x,y))
             },
 
             Operation::LessOrEqualUnsigned(ref a,ref b) => {
                 let x = Clp::execute(pp,&Operation::LessUnsigned(a.clone(),b.clone()));
                 let y = Clp::execute(pp,&Operation::Equal(a.clone(),b.clone()));
-                Clp::execute(pp,&Operation::InclusiveOr(x,y))
+                Clp::execute(pp,&Operation::ExclusiveOr(x,y))
             },
 
             Operation::LessSigned(ref a,ref b) => {
                 if a.is_bottom() || b.is_bottom() {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::zero(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(0i64),
                     }
                 }
 
@@ -1784,94 +1755,96 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 let (min2,max2) = Self::signed_minmax(b);
 
                 if max1 < min2 {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::one(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(1i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 } else if min1 >= max2 {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 } else {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::one(),
-                        cardinality: I::one() + I::one(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Wrapping(1i64) + Wrapping(1i64),
                     }
                 }
             },
 
             Operation::LessUnsigned(ref a,ref b) => {
                 if a.is_bottom() || b.is_bottom() {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::zero(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(0i64),
                     }
                 }
 
                 let (min1,max1) = Self::unsigned_minmax(a);
                 let (min2,max2) = Self::unsigned_minmax(b);
 
+                println!("a: {:?}/{:?}, b: {:?}/{:?}",min1,max1,min2,max2);
+
                 if max1 < min2 {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::one(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(1i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 } else if min1 >= max2 {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 } else {
-                    return Clp::<I>{
+                    return Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::one(),
-                        cardinality: I::one() + I::one(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Wrapping(2),
                     }
                 }
             }, 
 
             Operation::Equal(ref a,ref b) => {
                 if a.is_bottom() || b.is_bottom() {
-                    Clp::<I>{
+                    Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::zero(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(0i64),
                     }
-                } else if a.cardinality == I::one() && b.cardinality == I::one() && a.base == b.base {
-                    Clp::<I>{
+                } else if a.cardinality == Wrapping(1i64) && b.cardinality == Wrapping(1i64) && a.base == b.base {
+                    Clp{
                         width: 1,
-                        base: I::one(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(1i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
-                } else if Clp::<I>::intersection(a,b).is_bottom() {
-                    Clp::<I>{
+                } else if Clp::intersection(a,b).is_bottom() {
+                    Clp{
                         width: 1,
-                        base: I::zero(),
-                        stride: I::zero(),
-                        cardinality: I::one(),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(0i64),
+                        cardinality: Wrapping(1i64),
                     }
                 } else {
-                    Clp::<I>{
+                    Clp{
                         width: b.width,
-                        base: I::zero(),
-                        stride: I::one(),
-                        cardinality: Clp::<I>::mask(b.width),
+                        base: Wrapping(0i64),
+                        stride: Wrapping(1i64),
+                        cardinality: Clp::mask(b.width),
                     }
                 }
             },
@@ -1879,14 +1852,14 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
             Operation::Move(ref a) => a.clone(),
             Operation::Call(ref a) => a.clone(),
 
-            Operation::ZeroExtend(ref sz,ref a) => Clp::<I>{
+            Operation::ZeroExtend(ref sz,ref a) => Clp{
                 width: *sz,
                 base: a.base,
                 stride: a.stride,
                 cardinality: a.cardinality,
             },
 
-            Operation::SignExtend(ref sz,ref a) => Clp::<I>{
+            Operation::SignExtend(ref sz,ref a) => Clp{
                 width: *sz,
                 base: a.base,
                 stride: a.stride,
@@ -1894,21 +1867,21 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
             },
 
             Operation::Select(ref off,ref a,ref b) => {
-                let o = Clp::<I>{
+                let o = Clp{
                     width: a.width,
-                    base: I::from_usize(*off).unwrap(),
-                    stride: I::zero(),
-                    cardinality: I::one(),
+                    base: Wrapping(*off as i64),
+                    stride: Wrapping(0i64),
+                    cardinality: Wrapping(1i64),
                 };
                 let x = Clp::execute(pp,&Operation::ShiftRightUnsigned(a.clone(),o));
                 Clp::execute(pp,&Operation::DivideUnsigned(x,b.clone()))
             },
 
-            Operation::Load(_,ref a) => Clp::<I>{
+            Operation::Load(_,ref a) => Clp{
                 width: a.width,
-                base: I::zero(),
-                stride: I::one(),
-                cardinality: Clp::<I>::mask(a.width),
+                base: Wrapping(0i64),
+                stride: Wrapping(1i64),
+                cardinality: Clp::mask(a.width),
             },
 
             Operation::Store(_,ref a) => a.clone(),
@@ -1917,7 +1890,7 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
                 0 => unreachable!(),
                 1 => v[0].clone(),
                 _ => v.iter().skip(1).fold(v[0].clone(),|acc,x| {
-                    Clp::<I>::union(&acc,x)
+                    Clp::union(&acc,x)
                 }),
             },
         }
@@ -1927,6 +1900,7 @@ impl<I: Integer + FromPrimitive + Signed + Decodable + Encodable + Debug + Clone
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::Wrapping;
     use {
         Statement,Operation,
         ControlFlowTarget,Function,ControlFlowGraph,
@@ -2371,99 +2345,67 @@ mod tests {
     }
 
     #[test]
- /*   fn ext_strided_interval() {
-
-        {
-            let a = ExtStridedInterval::Interval{
-                stride: 4, first: 0x7ff0, last: 0x7ffc, size: 16 };
-            let b = ExtStridedInterval::Interval{
-                stride: 0, first: 4, last: 4, size: 16 };
-            let res = ExtStridedInterval::execute(&Operation::Add(a,b));
-            let exp = ExtStridedInterval::Interval{
-                stride: 4, first: 0x7ff4, last: 0x8000, size: 16 };
-
-            assert_eq!(res, exp);
-        }
-
-        {
-            let a = ExtStridedInterval::Interval{
-                stride: 1, first: 10, last: 20, size: 16 };
-            let b = ExtStridedInterval::Interval{
-                stride: 1, first: 0xfffffffffffffffe, last: 2, size: 64 };
-            let exp = vec![
-                ExtStridedInterval::Interval{
-                    stride: 1, first: 0, last: 2, size: 64 },
-                ExtStridedInterval::Interval{
-                    stride: 1, first: 0xfffffffffffffffe, last: 0xffffffffffffffff, size: 64 }
-            ];
-
-            assert_eq!(a.dsi(), vec![a]);
-            assert_eq!(b.dsi(), exp);
-        }
-    }*/
-
-    #[test]
-    fn circular_linear_progression() {
+    fn clp_helper() {
         // eea
         {
-            let (a,b) = Clp::<i64>::eea(&99,&78);
-            assert_eq!(a, 3);
-            assert_eq!(b, -11);
+            let (a,b) = Clp::eea(&Wrapping(99),&Wrapping(78));
+            assert_eq!(a, Wrapping(3));
+            assert_eq!(b, Wrapping(-11));
 
-            let (a,b) = Clp::<i64>::eea(&78,&99);
-            assert_eq!(a, 3);
-            assert_eq!(b, 14);
+            let (a,b) = Clp::eea(&Wrapping(78),&Wrapping(99));
+            assert_eq!(a, Wrapping(3));
+            assert_eq!(b, Wrapping(14));
         }
 
         // canonize
         {
-            let a = Clp::<i64>{ width: 8, base: 216, stride: 48, cardinality: 19 };
-            let c = Clp::<i64>{ width: 8, base: 8, stride: 16, cardinality: 16 };
+            let a = Clp{ width: 8, base: Wrapping(216), stride: Wrapping(48), cardinality: Wrapping(19) };
+            let c = Clp{ width: 8, base: Wrapping(8), stride: Wrapping(16), cardinality: Wrapping(16) };
 
             assert_eq!(c, Clp::canonize(&a));
-            Clp::canonize(&Clp::<i64>{ width: 64, base: 216, stride: 48, cardinality: 19 });
+            Clp::canonize(&Clp{ width: 64, base: Wrapping(216), stride: Wrapping(48), cardinality: Wrapping(19) });
         }
 
         {
-            let a = Clp::<i64>{ width: 8, base: 216, stride: 48, cardinality: 15 };
-            let c = Clp::<i64>{ width: 8, base: 184, stride: 16, cardinality: 15 };
+            let a = Clp{ width: 8, base: Wrapping(216), stride: Wrapping(48), cardinality: Wrapping(15) };
+            let c = Clp{ width: 8, base: Wrapping(184), stride: Wrapping(16), cardinality: Wrapping(15) };
 
             assert_eq!(c, Clp::canonize(&a));
-            Clp::canonize(&Clp::<i64>{ width: 64, base: 216, stride: 48, cardinality: 15 });
+            Clp::canonize(&Clp{ width: 64, base: Wrapping(216), stride: Wrapping(48), cardinality: Wrapping(15) });
         }
 
         {
-            let a = Clp::<i64>{ width: 8, base: 90, stride: 132, cardinality: 7 };
-            let c = Clp::<i64>{ width: 8, base: 114, stride: 124, cardinality: 7 };
+            let a = Clp{ width: 8, base: Wrapping(90), stride: Wrapping(132), cardinality: Wrapping(7) };
+            let c = Clp{ width: 8, base: Wrapping(114), stride: Wrapping(124), cardinality: Wrapping(7) };
 
             assert_eq!(c, Clp::canonize(&a));
-            Clp::canonize(&Clp::<i64>{ width: 64, base: 90, stride: 132, cardinality: 7 });
+            Clp::canonize(&Clp{ width: 64, base: Wrapping(90), stride: Wrapping(132), cardinality: Wrapping(7) });
         }
 
         // unsigned union
         {
-            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
-            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 7 };
-            let u2 = Clp::<i64>{ width: 8, base: 14, stride: 30, cardinality: 3 };
+            let c = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(10) };
+            let u1 = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(7) };
+            let u2 = Clp{ width: 8, base: Wrapping(14), stride: Wrapping(30), cardinality: Wrapping(3) };
 
             assert_eq!(c, Clp::union(&u1,&u2));
         }
 
         // signed union
         {
-            let c = Clp{ width: 8, base: 60, stride: 30, cardinality: 10 };
-            let u1 = Clp{ width: 8, base: 60, stride: 30, cardinality: 3 };
-            let u2 = Clp{ width: 8, base: -106, stride: 30, cardinality: 7 };
+            let c = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(10) };
+            let u1 = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(3) };
+            let u2 = Clp{ width: 8, base: Wrapping(-106), stride: Wrapping(30), cardinality: Wrapping(7) };
 
             assert_eq!(c, Clp::union(&u1,&u2));
         }
 
         // unsigned AP
         {
-            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let c = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(10) };
             let ap = Clp::unsigned_progression(&c);
-            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 7 };
-            let u2 = Clp::<i64>{ width: 8, base: 14, stride: 30, cardinality: 3 };
+            let u1 = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(7) };
+            let u2 = Clp{ width: 8, base: Wrapping(14), stride: Wrapping(30), cardinality: Wrapping(3) };
 
             assert_eq!(ap.len(), 2);
             assert!(ap[0] == u1 || ap[0] == u2);
@@ -2475,10 +2417,10 @@ mod tests {
 
         // signed AP
         {
-            let c = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 10 };
+            let c = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(10) };
             let ap = Clp::signed_progression(&c);
-            let u1 = Clp::<i64>{ width: 8, base: 60, stride: 30, cardinality: 3 };
-            let u2 = Clp::<i64>{ width: 8, base: -106, stride: 30, cardinality: 7 };
+            let u1 = Clp{ width: 8, base: Wrapping(60), stride: Wrapping(30), cardinality: Wrapping(3) };
+            let u2 = Clp{ width: 8, base: Wrapping(-106), stride: Wrapping(30), cardinality: Wrapping(7) };
 
             assert_eq!(ap.len(), 2);
             assert!(ap[0] == u1 || ap[0] == u2);
@@ -2487,5 +2429,214 @@ mod tests {
 
             assert_eq!(c, Clp::union(&u1,&u2));
         }
+    }
+
+macro_rules! kset_clp_xcheck {
+    ($op:path,$a:ident,$b:ident) => {{
+        use std::iter::FromIterator;
+
+        println!("in: {:?},{:?}",$a,$b);
+
+        let mut a = $a;
+        let mut b = $b;
+
+        if a.1 == 0 && a.2 > 1 { a.1 = 1 }
+        if b.1 == 0 && b.2 > 1 { b.1 = 1 }
+
+        /*if a.2 + b.2 > 3 {
+            if a.2 % 2 == 0 {
+                a.2 = 2;
+                b.2 = 1;
+            } else {
+                a.2 = 1;
+                b.2 = 2;
+            }
+        }*/
+
+        let clp_a = Clp{
+            width: 16,
+            base: Wrapping(a.0 as i64),
+            stride: Wrapping(a.1 as i64),
+            cardinality: Wrapping(a.2 as i64),
+        };
+        let clp_b = Clp{
+            width: 16,
+            base: Wrapping(b.0 as i64),
+            stride: Wrapping(b.1 as i64),
+            cardinality: Wrapping(b.2 as i64),
+        };
+        let pp = ProgramPoint{ address: 0, position: 0 };
+
+        println!("{:?} + {:?} =",clp_a,clp_b);
+
+        let clp_op = $op(clp_a,clp_b);
+        let clp_res = Clp::execute(&pp,&clp_op);
+        let kset_a = Kset::Set(Vec::<(u64,usize)>::from_iter((0..a.2).map(|i| 
+            (a.0.wrapping_add(a.1.wrapping_mul(i as i16)) as u64 & 0xffff,16)
+        )));
+        let kset_b = Kset::Set(Vec::<(u64,usize)>::from_iter((0..b.2).map(|i| 
+            (b.0.wrapping_add(b.1.wrapping_mul(i as i16)) as u64 & 0xffff,16)
+        )));
+        let kset_op = $op(kset_a,kset_b);
+        let kset_res = Kset::execute(&pp,&kset_op);
+        let msk = Wrapping(0xffffi64);
+
+        println!("{:?}/{:?}",clp_res,kset_res);
+
+        let ret = match kset_res {
+            Kset::Meet => clp_res.cardinality.0 == 0,
+            Kset::Set(ref v) => {
+                if clp_res.cardinality.0 > 0xffff {
+                    true
+                } else {
+                    if clp_res.cardinality.0 < v.len() as i64 {
+                        println!("clp too small: {} kset: {}",clp_res.cardinality.0,v.len());
+                        false
+                    } else {
+                        v.iter().all(|x| {
+                            let l = Wrapping(x.0 as i64);
+                            let ret = if clp_res.is_top() {
+                                true
+                            } else if clp_res.is_bottom() {
+                                false
+                            } else if clp_res.cardinality.0 == 1 {
+                                clp_res.base & msk == l & msk
+                            } else {
+                                let mut ret = false;
+                                for y in 0..clp_res.cardinality.0 {
+                                    let i = Wrapping(y);
+                                    ret |= (clp_res.base + clp_res.stride * i) & msk == l;
+                                }
+                                ret
+                            };
+
+                            if !ret {
+                                println!("{} not in {:?}",x.0,clp_res);
+                            }
+                            ret
+                        })
+                    }
+                }
+            }
+            Kset::Join => clp_res.cardinality.0 > 0xffff,
+        };
+        println!("");
+        ret
+    }
+}}
+
+    quickcheck! {
+        /*fn clp_closest_element_qc(a_: (i16,i16,u16), l: i16) -> bool {
+            use std::cmp;
+            use std::i64;
+
+            let mut a = a_;
+
+            if a.1 == 0 && a.2 > 1 { a.1 = 1 }
+
+            let clp_a = Clp{
+                width: 16,
+                base: Wrapping(a.0 as i64),
+                stride: Wrapping(a.1 as i64),
+                cardinality: Wrapping(a.2 as i64),
+            };
+            let msk = 0xffff;
+
+            println!("clp: {:?}, l: {}",clp_a,l);
+
+            if !clp_a.is_bottom() && !clp_a.is_top() {
+                let (_,_,_,_,_,gamma) = Clp::closest_element(&clp_a,&Wrapping(l as i64));
+                let mut gap = i64::MAX;
+                for i in 0..(a.2 as i64) {
+                    let v = (clp_a.base + clp_a.stride * Wrapping(i)) & Wrapping(0xffff);
+                    if v.0 <= l as i64 {
+                        gap = cmp::min(gap,(l as i64) - v.0);
+                    }
+                }
+
+                if gamma.0 & msk != (clp_a.base.0 - (l as i64)) & msk && (-gamma.0) & msk != gap & msk {
+                    println!("FAILED gap: {}, gamma: {}",(clp_a.base.0 - (l as i64)) & msk,gamma.0 & msk);
+                    println!("ALT gap: {}, gamma: {}",gap & msk,(-gamma.0) & msk);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                true
+            }
+        }*/
+
+        fn clp_sub_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::Subtract,a_,b_)
+        }
+
+        fn clp_add_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::Add,a_,b_)
+        }
+
+        fn clp_mul_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::Multiply,a_,b_)
+        }
+
+        fn clp_divs_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::DivideSigned,a_,b_)
+        }
+
+        fn clp_divu_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::DivideUnsigned,a_,b_)
+        }
+        
+        fn clp_mod_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::Modulo,a_,b_)
+        }
+
+        fn clp_shl_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::ShiftLeft,a_,b_)
+        }
+
+        fn clp_shru_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::ShiftRightUnsigned,a_,b_)
+        }
+
+        fn clp_shrs_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::ShiftRightSigned,a_,b_)
+        }
+
+        fn clp_and_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::And,a_,b_)
+        }
+
+        fn clp_or_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::InclusiveOr,a_,b_)
+        }
+
+        fn clp_xor_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::ExclusiveOr,a_,b_)
+        }
+
+        fn clp_eq_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::Equal,a_,b_)
+        }
+
+        fn clp_lu_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::LessUnsigned,a_,b_)
+        }
+
+        fn clp_ls_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::LessSigned,a_,b_)
+        }
+
+        fn clp_leu_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::LessOrEqualUnsigned,a_,b_)
+        }
+
+        fn clp_les_semantics_qc(a_: (i16,i16,u16), b_: (i16,i16,u16)) -> bool {
+            kset_clp_xcheck!(Operation::LessOrEqualSigned,a_,b_)
+        }
+
+        /*
+        &Operation::Select(ref off, _, _) => Operation::Select(*off,args[0].clone(),args[1].clone()),
+        &Operation::ZeroExtend(ref sz, _) => Operation::ZeroExtend(*sz,args[0].clone()),
+        &Operation::SignExtend(ref sz,_) => Operation::SignExtend(*sz,args[0].clone()),*/
     }
 }
