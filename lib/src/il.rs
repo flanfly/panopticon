@@ -636,7 +636,12 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
             let a = Wrapping(_a);
             let b = Wrapping(_b);
             let mask = Wrapping(if s < 64 { (1u64 << s) - 1 } else { u64::MAX });
-            Rvalue::Constant{ value: ((a * b) & mask).0, size: s }
+
+            if (b & mask) == Wrapping(0) {
+                Rvalue::Undefined
+            } else {
+                Rvalue::Constant{ value: ((a / b) & mask).0, size: s }
+            }
         }
         Operation::DivideUnsigned(ref a,Rvalue::Constant{ value: 1,.. }) =>
             a.clone(),
@@ -650,11 +655,33 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::DivideSigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: _b, size: _s }) => {
             debug_assert!(s == _s);
 
-            let a = Wrapping(_a);
-            let b = Wrapping(_b);
-            let mask = Wrapping(if s < 64 { (1u64 << (s - 1)) - 1 } else { u64::MAX });
-            let sign_mask = Wrapping(if s < 64 { 1u64 << s } else { 0u64 });
-            Rvalue::Constant{ value: (((a * b) & mask) | ((a ^ b) & sign_mask)).0 , size: s }
+            let mut a = Wrapping(_a as i64);
+            let mut b = Wrapping(_b as i64);
+
+            if s < 64 {
+                let sign_bit = Wrapping(1 << (s - 1));
+                let m = Wrapping(1 << s);
+
+                if sign_bit & a != Wrapping(0) {
+                    a = a - m;
+                }
+                if sign_bit & b != Wrapping(0) {
+                    b = b - m;
+                }
+                a = a % m;
+                b = b % m;
+            }
+
+            if b == Wrapping(0) {
+                Rvalue::Undefined
+            } else {
+                if s < 64 {
+                    let m = (1 << s) - 1;
+                    Rvalue::Constant{ value: (a / b).0 as u64 % m, size: s }
+                } else {
+                    Rvalue::Constant{ value: (a / b).0 as u64, size: s }
+                }
+            }
         }
         Operation::DivideSigned(ref a,Rvalue::Constant{ value: 1,.. }) =>
             a.clone(),
@@ -665,15 +692,38 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
 
         Operation::Modulo(_,Rvalue::Constant{ value: 0,.. }) =>
             Rvalue::Undefined,
-        Operation::Modulo(Rvalue::Constant{ value: a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
+        Operation::Modulo(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: _b, size: _s }) => {
             debug_assert!(s == _s);
 
-            let mask = if s < 64 { (1u64 << s) - 1 } else { u64::MAX };
-            Rvalue::Constant{ value: (a % b) & mask, size: s }
+            let mut a = Wrapping(_a as i64);
+            let mut b = Wrapping(_b as i64);
+
+            if s < 64 {
+                let sign_bit = Wrapping(1 << (s - 1));
+                let m = Wrapping(1 << s);
+
+                if sign_bit & a != Wrapping(0) {
+                    a = a - m;
+                }
+                if sign_bit & b != Wrapping(0) {
+                    b = b - m;
+                }
+                a = a % m;
+                b = b % m;
+            }
+
+            if b == Wrapping(0) {
+                Rvalue::Undefined
+            } else {
+                if s < 64 {
+                    let m = (1 << s) - 1;
+                    Rvalue::Constant{ value: (a % b).0 as u64 & m, size: s }
+                } else {
+                    Rvalue::Constant{ value: (a % b).0 as u64, size: s }
+                }
+            }
         }
         Operation::Modulo(Rvalue::Constant{ value: 0, size: s },_) =>
-            Rvalue::Constant{ value: 0, size: s },
-        Operation::Modulo(_,Rvalue::Constant{ value: 1, size: s }) =>
             Rvalue::Constant{ value: 0, size: s },
         Operation::Modulo(_,_) =>
             Rvalue::Undefined,
@@ -693,11 +743,12 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
             Rvalue::Undefined,
 
         Operation::ShiftRightUnsigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
+            use std::cmp;
             debug_assert!(s == _s);
 
-            let a = Wrapping(_a);
-            let mask = Wrapping(if s < 64 { (1u64 << s) - 1 } else { u64::MAX });
-            Rvalue::Constant{ value: ((a >> (b as usize)) & mask).0, size: s }
+            let a = (_a);
+            let mask = (if s < 64 { (1u64 << s) - 1 } else { u64::MAX });
+            Rvalue::Constant{ value: ((a >> cmp::min(s,(b as usize))) & mask), size: s }
         },
         Operation::ShiftRightUnsigned(Rvalue::Constant{ value: 0, size: s },_) =>
             Rvalue::Constant{ value: 0, size: s },
@@ -707,12 +758,39 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
             Rvalue::Undefined,
 
         Operation::ShiftRightSigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
+            use std::cmp;
             debug_assert!(s == _s);
 
-            let a = Wrapping(_a);
-            let mask = Wrapping(if s < 64 { (1u64 << s) - 1 } else { u64::MAX });
-            let sign = Wrapping(if s < 64 { 1u64 << (s - 1) } else { 0 });
-            Rvalue::Constant{ value: ((((a & mask) >> (b as usize)) & mask) | (a & sign)).0, size: s }
+            let mut a = Wrapping(_a as i64);
+
+            if s < 64 {
+                let sign_bit = Wrapping(1 << (s - 1));
+                let m = Wrapping(1 << s);
+
+                if sign_bit & a != Wrapping(0) {
+                    a = a - m;
+                }
+                a = a % m;
+            }
+
+            if b >= s as u64 {
+                return if a < Wrapping(0) {
+                    if s < 64 {
+                        Rvalue::Constant{ value: (1 << s) - 1, size: s }
+                    } else {
+                        Rvalue::Constant{ value: u64::MAX, size: s }
+                    }
+                } else {
+                    Rvalue::Constant{ value: 0, size: s }
+                }
+            }
+
+            if s < 64 {
+                let m = (1 << s) - 1;
+                Rvalue::Constant{ value: (a >> (b as usize)).0 as u64 & m, size: s }
+            } else {
+                Rvalue::Constant{ value: (a >> (b as usize)).0 as u64, size: s }
+            }
         },
         Operation::ShiftRightSigned(Rvalue::Constant{ value: 0, size: s },_) =>
             Rvalue::Constant{ value: 0, size: s },
@@ -805,11 +883,12 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::LessOrEqualSigned(_,_) =>
             Rvalue::Undefined,
 
-        Operation::LessUnsigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: _b, size: _s }) => {
+        Operation::LessUnsigned(Rvalue::Constant{ value: a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
             debug_assert!(s == _s);
 
             let a = if s < 64 { Wrapping(_a & ((1 << s) - 1)) } else { Wrapping(_a) };
             let b = if s < 64 { Wrapping(_b & ((1 << s) - 1)) } else { Wrapping(_b) };
+
             if a < b {
                 Rvalue::Constant{ value: 1, size: 1 }
             } else {
