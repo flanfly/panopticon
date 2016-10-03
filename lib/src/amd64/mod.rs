@@ -48,7 +48,7 @@ use {
 
 
 #[macro_use]
-mod tables;
+pub mod tables;
 pub mod semantic;
 
 #[derive(Clone,Debug)]
@@ -139,7 +139,7 @@ impl Architecture for Amd64 {
 }
 
 #[derive(PartialEq,Clone,Copy,Debug)]
-enum SegmentOverride {
+pub enum SegmentOverride {
     None, Cs, Ss, Ds, Es, Fs, Gs,
 }
 
@@ -397,11 +397,7 @@ impl Display for Register {
             Register::None => "",
         };
 
-        if !f.alternate() {
-            f.write_str(&s.to_lowercase())
-        } else {
-            f.write_str(&s.to_uppercase())
-        }
+        f.write_str(&s)
     }
 }
 
@@ -618,7 +614,7 @@ pub enum OperandType {
     NTA, T0, T1, T2,
 }
 
-fn read_spec_register(op: OperandType,opsz: usize,rex_b: bool) -> Result<Operand> {
+pub fn read_spec_register(op: OperandType,opsz: usize,rex_b: bool) -> Result<Operand> {
     match op {
         OperandType::RAX => Ok(Operand::Register(Register::RAX)),
         OperandType::RBX => Ok(Operand::Register(Register::RBX)),
@@ -749,7 +745,7 @@ pub enum OperandSpec {
 }
 
 #[derive(Clone,Debug)]
-enum Operand {
+pub enum Operand {
     Register(Register),
     Immediate(u64,usize), // Value, Width (Bits)
     Indirect(SegmentOverride,Register,Register,usize,(u64,usize),usize), // Segment Override, Base, Index, Scale, Disp, Width (Bits)
