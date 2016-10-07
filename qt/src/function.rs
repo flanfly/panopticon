@@ -399,9 +399,10 @@ pub fn approximate(arg: &Variant) -> Variant {
     Variant::String(if let &Variant::String(ref uuid_str) = arg {
         if let Some(tgt_uuid) = Uuid::parse_str(uuid_str).ok() {
             let ret = Controller::read(|proj| {
+                let root = proj.data.dependencies.vertex_label(proj.data.root).unwrap();
                 if let Some((vx,prog)) = proj.find_call_target_by_uuid(&tgt_uuid) {
                     if let Some(&CallTarget::Concrete(ref fun)) = prog.call_graph.vertex_label(vx) {
-                        return_json(panopticon::approximate::<Kset>(&fun).and_then(|x| Ok(x.iter().filter_map(|(k,v)| {
+                        return_json(panopticon::approximate::<Kset>(&fun,Some(root)).and_then(|x| Ok(x.iter().filter_map(|(k,v)| {
                             if let &Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = k {
                                 if let &Kset::Set(ref s) = v {
                                     if s.len() == 1 {

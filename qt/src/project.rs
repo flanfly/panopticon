@@ -303,9 +303,14 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                                 fixpoint = true;
                                 ssa_convertion(&mut func);
 
-                                let vals = try!(approximate::<Kset>(&func));
+                                let vals = try!(try!(Controller::read(|proj| {
+                                    let root = proj.data.dependencies.vertex_label(proj.data.root).unwrap();
+                                    approximate::<Kset>(&func,Some(root))
+                                })));
                                 let vxs = { func.cflow_graph.vertices().collect::<Vec<_>>() };
                                 let mut resolved_jumps = HashSet::<u64>::new();
+
+                                debug!("vals: {:?}",vals);
 
                                 for &vx in vxs.iter() {
                                     if let Some(&mut ControlFlowTarget::Unresolved(ref mut var@Rvalue::Variable{..})) = func.cflow_graph.vertex_label_mut(vx) {

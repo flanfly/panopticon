@@ -48,6 +48,105 @@ pub enum Machine {
     Ia32,
 }
 
+/// Initial ELF identifier section
+#[derive(Debug)]
+pub struct Ident {
+    /// ELF magic number. Must be `ELF\177`
+    pub magic: [u8; 4],
+    /// Whenever ELF32 or ELF64
+    pub class: u8,
+    /// Endianess of the CPU
+    pub data: u8,
+    /// ELF version. Must be 0.
+    pub version: usize,
+    /// Application Binary Interface of the code inside. CPU depend.
+    pub abi: u8,
+    /// Version of the Application Binary Interface.
+    pub abi_ver: usize,
+    /// Padding bytes. Must be 0.
+    pub pad: [u8; 7],
+}
+
+const EI_CLASS: usize = 4;
+const EI_DATA: usize = 5;
+const EI_VERSION: usize = 6;
+const EI_OSABI: usize = 7;
+const EI_ABIVERSION: usize = 8;
+const EI_PAD: usize = 9;
+
+impl Ident {
+    /// Reads and sanity checks a ELF identifier section from `R`.
+    pub fn read<R: Read>(strm: &mut R) -> Result<Ident> {
+        let mut e_ident = [0u8; 16];
+
+        if let Err(_) = strm.read(&mut e_ident) {
+            return Err("Failed to read ident".into());
+        }
+
+        if e_ident[0..4] != [0x7f, 0x45, 0x4c, 0x46] {
+            return Err("Invalid magic number".into());
+        }
+
+        if e_ident[EI_PAD..16].iter().any(|&x| x != 0) {
+            return Err("Invalid padding".into());
+        }
+
+        if e_ident[EI_VERSION] != 1 {
+            return Err("Invalid ELF version".into());
+        }
+
+        Ok(Ident{
+            magic: [e_ident[0],e_ident[1],e_ident[2],e_ident[3]],
+            class: e_ident[EI_CLASS],
+            data: e_ident[EI_DATA],
+            version: e_ident[EI_VERSION] as usize,
+            abi: e_ident[EI_OSABI],
+            abi_ver: e_ident[EI_ABIVERSION] as usize,
+            pad: [
+                  e_ident[EI_PAD+0],
+                  e_ident[EI_PAD+1],
+                  e_ident[EI_PAD+2],
+                  e_ident[EI_PAD+3],
+                  e_ident[EI_PAD+4],
+                  e_ident[EI_PAD+5],
+                  e_ident[EI_PAD+6]
+            ],
+        })
+    }
+}
+
+macro_rules! load_impl {
+    ($elf:expr, $fd:expr, $interp:expr, $entry:expr, $reg:expr) => {{
+        info!("Soname: {:?} with interpreter: {:?}", $elf.soname, $elf.interpreter);
+        info!("Libs: {:?}", $elf.libraries);
+
+        for ph in $elf.program_headers {
+            if ph.p_type == program_header::PT_LOAD {
+                let mut buf = vec![0u8; ph.p_filesz as usize];
+
+                info!("Load ELF {} bytes segment to {:#x}",ph.p_filesz,ph.p_vaddr);
+
+                if $fd.seek(SeekFrom::Start(ph.p_offset as u64)).ok() == Some(ph.p_offset as u64) {
+                    try!($fd.read_exact(&mut buf));
+                    $reg.cover(Bound::new(ph.p_vaddr as u64, (ph.p_vaddr + ph.p_filesz) as u64), Layer::wrap(buf));
+                } else {
+                    return Err("Failed to read segment".into())
+                }
+            }
+        }
+
+        for rel in $elf.rela.iter() {
+            info!("rela: {:?}",rel);
+        }
+
+        for rel in $elf.pltrela.iter() {
+            info!("pltrela: {:?}",rel);
+        }
+
+        ($elf.entry,$elf.interpreter)
+    }}
+}
+
 /// Load an ELF file from disk and creates a `Project` from it. Returns the `Project` instance and
 /// the CPU its intended for.
 pub fn load(p: &Path) -> Result<(Project,Machine)> {

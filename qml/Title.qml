@@ -125,7 +125,7 @@ Window {
 								break;
 							}
 							case "example": {
-								var res = JSON.parse(Panopticon.findDataFile("examples" + Panopticon.pathDelimiter + "static"))
+								var res = JSON.parse(Panopticon.findDataFile("examples" + Panopticon.pathDelimiter + "dynamic"))
 								if(res.status == "ok") {
 									var res = {
 										"kind": "elf",
