@@ -779,7 +779,7 @@ pub fn call(a: Rvalue) -> Result<(Vec<Statement>,JumpSpec)> {
         call ?, new_rip:64;
     });*/
     let stmts = try!(rreil!{
-        call ?, (a);
+        call (a);
     });
     Ok((stmts,JumpSpec::FallThru))
 }
@@ -1442,7 +1442,7 @@ pub fn retnf(_: Rvalue) -> Result<(Vec<Statement>,JumpSpec)> {
 
 pub fn ror(_: Rvalue, _: Rvalue) -> Result<(Vec<Statement>,JumpSpec)> { Ok((vec![],JumpSpec::FallThru)) }
 pub fn rol(a_: Rvalue, b_: Rvalue) -> Result<(Vec<Statement>,JumpSpec)> {
-/*    let (a,b,sz,mut stmts) = try!(sign_extend(&a_,&b_));
+  /*  let (a,b,sz,mut stmts) = try!(sign_extend(&a_,&b_));
     let res = rreil_lvalue!{ res:sz };
     let mut stmts = vec![];
     let msb = sz - 1;

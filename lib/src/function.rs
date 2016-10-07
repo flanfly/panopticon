@@ -61,10 +61,11 @@ use {
     Mnemonic,
     Statement,
     Operation,
+    Result,
 };
 
 /// Node of the function graph.
-#[derive(RustcDecodable,RustcEncodable,Debug)]
+#[derive(RustcDecodable,RustcEncodable,Debug,Clone)]
 pub enum ControlFlowTarget {
     /// A basic block
     Resolved(BasicBlock),
@@ -125,7 +126,7 @@ impl Function {
         }
     }
 
-    fn index_cflow_graph(g: ControlFlowGraph, maybe_entry: Option<u64>) -> (BTreeMap<u64,Vec<MnemonicOrError>>,HashMap<u64,Vec<(Rvalue,Guard)>>,HashMap<u64,Vec<(Rvalue,Guard)>>) {
+    fn index_cflow_graph(g: &ControlFlowGraph, maybe_entry: Option<u64>) -> (BTreeMap<u64,Vec<MnemonicOrError>>,HashMap<u64,Vec<(Rvalue,Guard)>>,HashMap<u64,Vec<(Rvalue,Guard)>>) {
         let mut mnemonics = BTreeMap::new();
         let mut by_source = HashMap::<u64,Vec<(Rvalue,Guard)>>::new();
         let mut by_destination = HashMap::<u64,Vec<(Rvalue,Guard)>>::new();
@@ -339,10 +340,19 @@ impl Function {
         ret
     }
 
+    pub fn disassemble_new<A: Architecture>(init: A::Configuration, start: u64, region: &Region) -> Result<Function>
+    where A: Debug, A::Configuration: Debug {
+        let name = format!("func_{}",start);
+        let mut func = Function::new(name,region.name().to_string());
+
+        try!(Function::disassemble::<A>(&mut func,init,start,region));
+        Ok(func)
+    }
+
     /// Start or continue disassembly a address `start` inside region `reg` with CPU state `init`.
     /// If `cont` is a function new mnemonics are appended to it, otherwise a new function is
     /// created.
-    pub fn disassemble<A: Architecture>(cont: Option<Function>, init: A::Configuration, reg: &Region, start: u64) -> Function
+    pub fn disassemble<A: Architecture>(func: &mut Function, init: A::Configuration, start: u64, region: &Region) -> Result<()>
     where A: Debug, A::Configuration: Debug {
         let name = cont.as_ref().map_or(format!("func_{}",start),|x| x.name.clone());
         let uuid = cont.as_ref().map_or(Uuid::new_v4(),|x| x.uuid.clone());
@@ -359,7 +369,7 @@ impl Function {
             Some(start)
         };
         let (mut mnemonics,mut by_source,mut by_destination) = cont.map_or(
-            (BTreeMap::new(),HashMap::new(),HashMap::new()),|x| Self::index_cflow_graph(x.cflow_graph,maybe_entry));
+            (BTreeMap::new(),HashMap::new(),HashMap::new()),|x| Self::index_cflow_graph(&x.cflow_graph,maybe_entry));
         let mut todo = HashSet::<u64>::new();
 
         todo.insert(start);
@@ -390,7 +400,7 @@ impl Function {
                 }
             }
 
-            let maybe_match = A::decode(reg,addr,&init);
+            let maybe_match = A::decode(region,addr,&init);
 
             match maybe_match {
                 Ok(match_st) => {
@@ -424,27 +434,23 @@ impl Function {
             }
         }
 
-        let cfg = Self::assemble_cflow_graph(mnemonics,by_source,by_destination,start);
+        func.cflow_graph = Self::assemble_cflow_graph(mnemonics,by_source,by_destination,start);
+        let entry_addr = func.entry_point.and_then(|x| {
+            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(x) {
+                Some(bb.area.start)
+            } else {
+                None
+            }
+        }).unwrap_or(start);
+        func.entry_point = func.cflow_graph.vertices().find(|&vx| {
+            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+                bb.area.start == entry_addr
+            } else {
+                false
+            }
+        });
 
-        let e = if let Some(addr) = maybe_entry {
-            cfg.vertices().find(|&vx| {
-                if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg.vertex_label(vx) {
-                    bb.area.start == addr
-                } else {
-                    false
-                }
-            })
-        } else {
-            None
-        };
-
-        Function{
-            uuid: uuid,
-            name: name,
-            cflow_graph: cfg,
-            entry_point: e,
-            region: reg.name().clone(),
-        }
+        Ok(())
     }
 
     /// Returns all call targets.
@@ -454,7 +460,7 @@ impl Function {
         for vx in self.cflow_graph.vertices() {
             if let Some(&ControlFlowTarget::Resolved(ref bb)) = self.cflow_graph.vertex_label(vx) {
                 bb.execute(|i| match i {
-                    &Statement{ op: Operation::Call(ref t), ..} => ret.push(t.clone()),
+                    &Statement::Call{ target: ref t, ..} => ret.push(t.clone()),
                     _ => {}
                 });
             }
@@ -519,6 +525,29 @@ impl Function {
         }
 
         format!("{}\n}}",ret)
+    }
+
+    pub fn resolve_calls(&mut self, entry: u64, func: &Uuid) -> bool {
+        let mut ret = false;
+        let vxs = self.cflow_graph.vertices().collect::<Vec<_>>();
+
+        for vx in vxs {
+            if let Some(&mut ControlFlowTarget::BasicBlock(ref mut bb)) = self.cflow_graph.vertex_label_mut(vx) {
+                bb.rewrite(|i| {
+                    let do_replace = if let &mut Statement::UnresolvedCall{ target: Rvalue::Constant{ value: entry,.. } } = i { true } else { false };
+                    if do_replace {
+                        ret = true;
+                        *i = Statement::ResolvedCall{
+                            function: CallTarget::Function(func.clone()),
+                            reads: vec![],
+                            writes: vec![],
+                        };
+                    }
+                });
+            }
+        }
+
+        ret
     }
 }
 

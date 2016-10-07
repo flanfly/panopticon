@@ -91,6 +91,7 @@ extern crate lazy_static;
 
 extern crate byteorder;
 extern crate goblin;
+extern crate parking_lot;
 
 #[macro_use]
 extern crate quickcheck;
@@ -112,6 +113,7 @@ pub use il::{
     Guard,
     Statement,
     Operation,
+    Endianess,
     execute,
     lift,
 };
@@ -138,6 +140,7 @@ pub use function::{
 
 pub mod program;
 pub use program::{
+    FunctionRef,
     Program,
     CallTarget,
     CallGraph,

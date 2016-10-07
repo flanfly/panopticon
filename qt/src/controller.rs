@@ -31,6 +31,7 @@ use libc::c_int;
 use qmlrs::{ffi,MetaObject,Variant,Object,ToQVariant,unpack_varlist};
 use rustc_serialize::{json,Encodable};
 use tempdir::TempDir;
+use uuid::Uuid;
 
 use panopticon::result;
 use panopticon::{
@@ -209,6 +210,11 @@ pub enum Backing {
     Named(PathBuf),
 }
 
+pub struct Session {
+    pub project: Project,
+    pub todo: Vec<(Uuid,u64,Cow<'static,str>,Option<Cow<'static,str>>)>,
+}
+
 impl Backing {
     pub fn path<'a>(&'a self) -> &'a Path {
         match self {
@@ -236,7 +242,7 @@ pub enum Controller {
     Set{
         //metaObject: MetaObject,
         singleton_object: Object,
-        project: Project,
+        session: Session,
         backing_file: Backing,
         is_dirty: bool,
     },
@@ -316,20 +322,20 @@ impl Controller {
         })
     }
 
-    pub fn read<A,F: FnOnce(&Project) -> A>(f: F) -> Result<A> {
+    pub fn read<A,F: FnOnce(&Session) -> A>(f: F) -> Result<A> {
         let guard = try!(CONTROLLER.read());
-        if let &Controller::Set{ ref project,.. } = &*guard {
-            Ok(f(project))
+        if let &Controller::Set{ ref session,.. } = &*guard {
+            Ok(f(session))
         } else {
             Err("Controller in wrong state (read)".into())
         }
     }
 
-    pub fn modify<A,F: FnOnce(&mut Project) -> A>(f: F) -> Result<A> {
+    pub fn modify<A,F: FnOnce(&mut Session) -> A>(f: F) -> Result<A> {
         {
             let mut guard = try!(CONTROLLER.write());
-            if let &mut Controller::Set{ ref mut project, ref mut is_dirty,.. } = &mut *guard {
-                let ret: Result<A> = Ok(f(project));
+            if let &mut Controller::Set{ ref mut session, ref mut is_dirty,.. } = &mut *guard {
+                let ret: Result<A> = Ok(f(session));
 
                 *is_dirty = true;
                 ret
@@ -345,8 +351,8 @@ impl Controller {
     pub fn sync() -> Result<()> {
         {
             let mut guard = try!(CONTROLLER.write());
-            if let &mut Controller::Set{ ref mut project, ref mut is_dirty, ref backing_file,.. } = &mut *guard {
-                try!(project.snapshot(&backing_file.path()));
+            if let &mut Controller::Set{ ref mut session, ref mut is_dirty, ref backing_file,.. } = &mut *guard {
+                try!(session.project.snapshot(&backing_file.path()));
                 *is_dirty = false;
                 Ok(())
             } else {
@@ -357,7 +363,7 @@ impl Controller {
         })
     }
 
-    pub fn replace(p: Project,q: Option<&Path>) -> Result<()> {
+    pub fn replace(p: Session,q: Option<&Path>) -> Result<()> {
         use paths::session_directory;
 
         {
@@ -378,8 +384,8 @@ impl Controller {
             };
 
             match &mut *guard {
-                &mut Controller::Set{ ref mut project, ref mut is_dirty, ref mut backing_file,.. } => {
-                    *project = p;
+                &mut Controller::Set{ ref mut session, ref mut is_dirty, ref mut backing_file,.. } => {
+                    *session = p;
                     *is_dirty = false;
                     *backing_file = bf;
                     Ok(())
@@ -394,7 +400,7 @@ impl Controller {
                     *ctrl = Controller::Set{
                         //metaObject: metaObject,
                         singleton_object: Object::from_ptr(so),
-                        project: p,
+                        session: p,
                         is_dirty: false,
                         backing_file: bf,
                     };

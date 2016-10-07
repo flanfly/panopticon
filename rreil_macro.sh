@@ -72,7 +72,7 @@ do
          echo "    // $A := $X, $Y"
          echo "    ( \$op:ident # $A_MATCH, $X_MATCH , $Y_MATCH ; \$(\$cdr:tt)*) => {"
          echo "        {"
-				 echo "            let mut stmt = vec![\$crate::Statement{ op: \$crate::Operation::\$op(rreil_rvalue!($X_ARG),rreil_rvalue!($Y_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+				 echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(rreil_rvalue!($X_ARG),rreil_rvalue!($Y_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
 				 print_tail
          echo "        }"
          echo "    };"
@@ -101,7 +101,7 @@ do
       echo "    // $A := $X"
       echo "    ( \$op:ident # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
       echo "        {"
-      echo "            let mut stmt = vec![\$crate::Statement{ op: \$crate::Operation::\$op(rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+      echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
 			print_tail
       echo "        }"
       echo "    };"
@@ -112,8 +112,34 @@ done
 echo "}"
 echo ""
 echo "#[macro_export]"
+echo "macro_rules! rreil_callop {"
+
+for A in noff off lit litw noff undef
+do
+   get_strings $A a
+   A_MATCH="$MATCH"
+   A_ARG="$ARG"
+
+   echo "    // call $A"
+   echo "    ( $A_MATCH ; \$(\$cdr:tt)*) => {"
+   echo "        {"
+   echo "            let mut stmt = vec![\$crate::Statement::Call{"
+   echo "                target: rreil_rvalue!($A_ARG),"
+	 echo "                reads: vec![],"
+   echo "                writes: vec![],"
+   echo "            }];"
+   print_tail
+   echo "        }"
+   echo "    };"
+   echo ""
+done
+
+echo "}"
+echo ""
+echo "#[macro_export]"
 echo "macro_rules! rreil_memop {"
 
+# Little Endian
 for A in lit litw noff undef
 do
    get_strings $A a
@@ -127,9 +153,33 @@ do
       X_ARG="$ARG"
 
       echo "    // $A := $X"
-      echo "    ( \$op:ident # \$bank:ident # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
+      echo "    ( \$op:ident # \$bank:ident # le # \$sz:tt # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
       echo "        {"
-      echo "            let mut stmt = vec![\$crate::Statement{ op: \$crate::Operation::\$op(::std::borrow::Cow::Borrowed(stringify!(\$bank)),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+			echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(::std::borrow::Cow::Borrowed(stringify!(\$bank)),\$crate::Endianess::Little,rreil_imm!(\$sz),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+			print_tail
+      echo "        }"
+      echo "    };"
+      echo ""
+   done
+done
+
+# Big Endian
+for A in lit litw noff undef
+do
+   get_strings $A a
+   A_MATCH="$MATCH"
+   A_ARG="$ARG"
+
+   for X in noff off lit litw const undef
+   do
+      get_strings $X x
+      X_MATCH="$MATCH"
+      X_ARG="$ARG"
+
+      echo "    // $A := $X"
+      echo "    ( \$op:ident # \$bank:ident # be # \$sz:tt # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
+      echo "        {"
+			echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(::std::borrow::Cow::Borrowed(stringify!(\$bank)),\$crate::Endianess::Big,rreil_imm!(\$sz),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
 			print_tail
       echo "        }"
       echo "    };"
@@ -157,7 +207,7 @@ do
       echo "    // $A := $X"
       echo "    ( \$op:ident # \$sz:tt # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
       echo "        {"
-      echo "            let mut stmt = vec![\$crate::Statement{ op: \$crate::Operation::\$op(rreil_imm!(\$sz),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+      echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(rreil_imm!(\$sz),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
 			print_tail
       echo "        }"
 			echo "    };"
@@ -185,7 +235,7 @@ do
       echo "    // $A := $X"
       echo "    ( \$op:ident # \$sz:tt # $A_MATCH, $X_MATCH ; \$(\$cdr:tt)*) => {"
       echo "        {"
-			echo "            let mut stmt = vec![\$crate::Statement{ op: \$crate::Operation::\$op(rreil_imm!(\$sz),rreil_rvalue!($A_ARG),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
+			echo "            let mut stmt = vec![\$crate::Statement::Simple{ op: \$crate::Operation::\$op(rreil_imm!(\$sz),rreil_rvalue!($A_ARG),rreil_rvalue!($X_ARG)), assignee: rreil_lvalue!($A_ARG)}];"
 			print_tail
       echo "        }"
       echo "    };"

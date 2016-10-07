@@ -21,6 +21,7 @@
 use std::io::{Seek,SeekFrom,Read,Cursor};
 use std::fs::File;
 use std::path::Path;
+use std::borrow::Cow;
 
 use graph_algos::MutableGraphTrait;
 use uuid::Uuid;
@@ -171,10 +172,9 @@ fn load_elf(bytes: &[u8], name: String) -> Result<(Project,Machine)> {
 
     debug!("interpreter: {:?}", &binary.interpreter);
 
-    let mut prog = Program::new("prog0");
+    let mut prog = Program::new("prog0".into());
     let mut proj = Project::new(name.clone(),reg);
-
-    prog.call_graph.add_vertex(CallTarget::Todo(Rvalue::new_u64(entry as u64),Some(name),Uuid::new_v4()));
+    let mut todo = vec![];
 
     let add_sym = |prog: &mut Program, sym: &elf::Sym, strtab: &goblin::strtab::Strtab| {
         let name = strtab[sym.st_name].to_string();
@@ -182,9 +182,9 @@ fn load_elf(bytes: &[u8], name: String) -> Result<(Project,Machine)> {
         debug!("Symbol: {} @ 0x{:x}: {:?}", name, addr, sym);
         if sym.is_function() {
             if sym.is_import() {
-                prog.call_graph.add_vertex(CallTarget::Symbolic(name,Uuid::new_v4()));
+                //prog.call_graph.add_vertex(CallTarget::Symbolic(name,"RAM".to_string(),(addr,addr+8),Uuid::new_v4()));
             } else {
-                prog.call_graph.add_vertex(CallTarget::Todo(Rvalue::new_u64(addr),Some(name),Uuid::new_v4()));
+                todo.push((prog.uuid.clone(),addr,"RAM".into(),Some(name.into())));
             }
         }
     };
@@ -221,11 +221,21 @@ fn load_elf(bytes: &[u8], name: String) -> Result<(Project,Machine)> {
     // for sym in &binary.syms {
     //     add_sym(&mut prog, sym, &binary.strtab);
     // }
+    for rel in binary.pltrela {
+        debug!("rela: {:?}",rel);
+        let sym = dynsyms[(*rel).r_sym() as usize].clone();
+        let name = dynstrtab[sym.st_name() as usize].to_string();
+        let addr = rel.r_offset();
+        debug!("\tval: 0x{:x} = {} + {}",addr,name,rel.r_addend());
+        prog.symbolic.insert(addr,addr+8);
+        //add_vertex(CallTarget::Symbolic(name,"RAM".to_string(),(addr,addr+8),Uuid::new_v4()));
+    }
 
     proj.comments.insert(("base".to_string(),entry),"main".to_string());
+                todo.push((prog.uuid.clone(),entry,"RAM".into(),Some("main".into())));
     proj.code.push(prog);
 
-    Ok((proj,machine))
+    Ok((proj,machine,todo))
 }
 
 /// Parses a PE32/PE32+ file from `bytes` and create a project from it.

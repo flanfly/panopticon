@@ -81,7 +81,7 @@ impl Avalue for Kset {
         }
     }
 
-    fn execute(_: &ProgramPoint, op: &Operation<Self>) -> Self {
+    fn execute(_: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>, _: &HashMap<Range<u64>,Cow<'static,str>>, _: &HashMap<(Cow<'static,str>,usize),Self>) -> Self {
         fn permute(_a: &Kset, _b: &Kset, f: &Fn(Rvalue,Rvalue) -> Rvalue) -> Kset {
             match (_a,_b) {
                 (&Kset::Join,_) => Kset::Join,
@@ -176,19 +176,32 @@ impl Avalue for Kset {
 
             Operation::Move(ref a) =>
                 map(a,&|a| execute(Operation::Move(a))),
-            Operation::Call(ref a) =>
-                map(a,&|a| execute(Operation::Call(a))),
             Operation::ZeroExtend(ref sz,ref a) =>
                 map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
             Operation::SignExtend(ref sz,ref a) =>
                 map(a,&|a| execute(Operation::SignExtend(*sz,a))),
             Operation::Select(ref off,ref a,ref b) =>
                 permute(a,b,&|a,b| execute(Operation::Select(*off,a,b))),
+            Operation::Initialize(_,_) =>
+                Kset::Join,
 
-            Operation::Load(ref r,ref a) =>
-                map(a,&|a| execute(Operation::Load(r.clone(),a))),
-            Operation::Store(ref r,ref a) =>
-                map(a,&|a| execute(Operation::Store(r.clone(),a))),
+            Operation::Load(ref r,ref endian,ref sz,ref a) =>
+                map(a,&|a| {
+                    println!("load from {:?}",a);
+                    if let Some(ref reg) = reg {
+                        if reg.name() == r {
+                            if let Rvalue::Constant{ value, size } = a {
+                                if let Some(Some(val)) = reg.iter().seek(value).next() {
+                                    println!("read {:?}",val);
+                                    return Rvalue::Constant{ value: val as u64, size: 8 };
+                                }
+                            }
+                        }
+                    }
+                    Rvalue::Undefined
+                }),
+            Operation::Store(ref r,ref endian,ref sz,ref a) =>
+                map(a,&|a| execute(Operation::Store(r.clone(),*endian,*sz,a))),
 
             Operation::Phi(ref ops) => {
                 match ops.len() {

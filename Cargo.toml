@@ -30,6 +30,8 @@ chrono-humanize = "0.0.6"
 goblin = "0.0.9"
 clap = "2.20.5"
 quickcheck = "0.3"
+rayon = "*"
+parking_lot = "*"
 
 [dev-dependencies]
 regex = "0.1"

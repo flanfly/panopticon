@@ -94,40 +94,35 @@ struct Metainfo {
 pub fn metainfo(arg: &Variant) -> Variant {
     Variant::String(if let &Variant::String(ref uuid_str) = arg {
         if let Some(tgt_uuid) = Uuid::parse_str(uuid_str).ok() {
-            let ret = Controller::read(|proj| {
-                if let Some((vx,prog)) = proj.find_call_target_by_uuid(&tgt_uuid) {
+            let ret = Controller::read(|sess| {
+                if let Some((prog,(func_ref,vx))) = sess.project.find_function_by_uuid(&tgt_uuid) {
                     // collect called functions' UUIDs
                     let calls = prog.call_graph.out_edges(vx).
                         map(|x| prog.call_graph.target(x)).
                         filter_map(|x| prog.call_graph.vertex_label(x)).
-                        map(|x| x.uuid().to_string()).
+                        map(|&CallTarget::Function(ref uuid)| uuid.to_string()).
                         collect();
 
+                    let func_guard = func_ref.read();
                     // match function
-                    match prog.call_graph.vertex_label(vx) {
-                        Some(&CallTarget::Concrete(Function{ ref uuid, ref name, entry_point: Some(ref ent), cflow_graph: ref cg,..})) =>
+                    match &*func_guard {
+                        &Function{ ref uuid, ref name, entry_point: Some(ref ent), cflow_graph: ref cg,..} => {
                             // match entry point
                             match cg.vertex_label(*ent) {
                                 Some(&ControlFlowTarget::Resolved(ref bb)) =>
                                     return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(bb.area.start), calls: calls })),
-                                Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: c,.. })) =>
-                                    return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(c), calls: calls })),
-                                Some(&ControlFlowTarget::Unresolved(_)) =>
-                                    return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls })),
-                                Some(&ControlFlowTarget::Failed(pos,_)) =>
-                                    return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(pos), calls: calls })),
-                                None => unreachable!(),
-                            },
-                        Some(&CallTarget::Concrete(Function{ ref uuid, ref name, entry_point: None,..})) =>
-                            return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls })),
-                        Some(&CallTarget::Symbolic(ref sym,ref uuid)) =>
-                            return_json(Ok(Metainfo{ kind: "symbol", name: Some(sym.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls })),
-                        Some(&CallTarget::Todo(Rvalue::Constant{ value: a,.. },_,ref uuid)) =>
-                            return_json(Ok(Metainfo{ kind: "todo", name: None, uuid: uuid.to_string(), entry_point: Some(a), calls: calls })),
-                        Some(&CallTarget::Todo(_,_,ref uuid)) =>
-                            return_json(Ok(Metainfo{ kind: "todo", name: None, uuid: uuid.to_string(), entry_point: None, calls: calls })),
-                        None =>
-                            return_json::<()>(Err("Internal error".into())),
+                                    Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: c,.. })) =>
+                                        return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(c), calls: calls })),
+                                    Some(&ControlFlowTarget::Unresolved(_)) =>
+                                        return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls })),
+                                    Some(&ControlFlowTarget::Failed(pos,_)) =>
+                                        return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(pos), calls: calls })),
+                                    None => unreachable!(),
+                            }
+                        }
+                        &Function{ ref uuid, ref name, entry_point: None, cflow_graph: ref cg,..} => {
+                            return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls }))
+                        }
                     }
                 } else {
                     return_json::<()>(Err("No function found for this UUID".into()))
@@ -217,48 +212,49 @@ struct ControlFlowGraph {
 pub fn control_flow_graph(arg: &Variant) -> Variant {
     Variant::String(if let &Variant::String(ref uuid_str) = arg {
         if let Some(tgt_uuid) = Uuid::parse_str(uuid_str).ok() {
-            let ret = Controller::read(|proj| {
-                if let Some((vx,prog)) = proj.find_call_target_by_uuid(&tgt_uuid) {
-                    if let Some(&CallTarget::Concrete(ref fun)) = prog.call_graph.vertex_label(vx) {
-                        let cfg = &fun.cflow_graph;
+            let ret = Controller::read(|sess| {
+                if let Some((prog,(func_ref,vx))) = sess.project.find_function_by_uuid(&tgt_uuid) {
+                    let func_guard = func_ref.read();
+                    let fun = &*func_guard;
+                    let cfg = &fun.cflow_graph;
 
-                        // entry
-                        let entry = if let Some(ent) = fun.entry_point {
-                            if let Some(a@&ControlFlowTarget::Resolved(_)) = cfg.vertex_label(ent) {
-                                Some(to_ident(a))
-                            } else {
-                                None
-                            }
+                    // entry
+                    let entry = if let Some(ent) = fun.entry_point {
+                        if let Some(a@&ControlFlowTarget::Resolved(_)) = cfg.vertex_label(ent) {
+                            Some(to_ident(a))
                         } else {
                             None
-                        };
+                        }
+                    } else {
+                        None
+                    };
 
-                        // nodes
-                        let nodes = cfg.vertices().
-                            filter_map(|x| {
-                                cfg.vertex_label(x).map(|x| to_ident(x))
-                            }).
-                            collect();
+                    // nodes
+                    let nodes = cfg.vertices().
+                        filter_map(|x| {
+                            cfg.vertex_label(x).map(|x| to_ident(x))
+                        }).
+                    collect();
 
 
-                        // basic block contents
-                        let code = cfg.vertices().filter_map(|x| {
-                            let lb = cfg.vertex_label(x);
-                            match lb {
-                                Some(&ControlFlowTarget::Resolved(ref bb)) => {
-                                    let mnes = bb.mnemonics.iter().filter_map(|x| {
-                                        if x.opcode.starts_with("__") {
-                                            None
-                                        } else {
-                                            let mut ops = x.operands.clone();
-                                            ops.reverse();
-                                            let args = x.format_string.iter().map(|x| match x {
-                                                &MnemonicFormatToken::Literal(ref s) =>
-                                                    CfgOperand{
-                                                        kind: "literal",
-                                                        display: s.to_string(),
-                                                        data: "".to_string(),
-                                                    },
+                    // basic block contents
+                    let code = cfg.vertices().filter_map(|x| {
+                        let lb = cfg.vertex_label(x);
+                        match lb {
+                            Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                                let mnes = bb.mnemonics.iter().filter_map(|x| {
+                                    if x.opcode.starts_with("__") {
+                                        None
+                                    } else {
+                                        let mut ops = x.operands.clone();
+                                        ops.reverse();
+                                        let args = x.format_string.iter().map(|x| match x {
+                                            &MnemonicFormatToken::Literal(ref s) =>
+                                                CfgOperand{
+                                                    kind: "literal",
+                                                    display: s.to_string(),
+                                                    data: "".to_string(),
+                                                },
                                                 &MnemonicFormatToken::Variable{ ref has_sign } =>
                                                     match ops.pop() {
                                                         Some(Rvalue::Constant{ value: c, size: s }) => {
@@ -288,102 +284,97 @@ pub fn control_flow_graph(arg: &Variant) -> Variant {
                                                                 data: "".to_string(),
                                                             },
                                                     },
-                                                &MnemonicFormatToken::Pointer{ is_code,.. } =>
-                                                    match ops.pop() {
-                                                        Some(Rvalue::Constant{ value: c, size: s }) => {
-                                                            let val = if s < 64 { c % (1u64 << s) } else { c };
-                                                            let (display,data) = if is_code {
-                                                                if let Some(vx) = prog.find_function_by_entry(val) {
-                                                                    if let Some(&CallTarget::Concrete(Function{ ref name, ref uuid,.. })) = prog.call_graph.vertex_label(vx) {
-                                                                        (name.clone(),format!("{}",uuid))
+                                                    &MnemonicFormatToken::Pointer{ is_code,.. } =>
+                                                        match ops.pop() {
+                                                            Some(Rvalue::Constant{ value: c, size: s }) => {
+                                                                let val = if s < 64 { c % (1u64 << s) } else { c };
+                                                                let (display,data) = if is_code {
+                                                                    if let Some((func_ref,_)) = prog.find_function_by_entry(val) {
+                                                                        let func_guard = func_ref.read();
+                                                                        let fun = &*func_guard;
+                                                                        (fun.name.clone(),format!("{}",fun.uuid))
                                                                     } else {
                                                                         (format!("{}",val),"".to_string())
                                                                     }
                                                                 } else {
                                                                     (format!("{}",val),"".to_string())
+                                                                };
+
+                                                                CfgOperand{
+                                                                    kind: "pointer",
+                                                                    display: display,
+                                                                    data: data,
                                                                 }
-                                                            } else {
-                                                                (format!("{}",val),"".to_string())
-                                                            };
-
-                                                            CfgOperand{
-                                                                kind: "pointer",
-                                                                display: display,
-                                                                data: data,
-                                                            }
+                                                            },
+                                                            Some(Rvalue::Variable{ ref name, subscript: Some(_),.. }) =>
+                                                                CfgOperand{
+                                                                    kind: "pointer",
+                                                                    display: name.to_string(),
+                                                                    data: "".to_string(),
+                                                                },
+                                                            _ =>
+                                                                CfgOperand{
+                                                                    kind: "pointer",
+                                                                    display: "?".to_string(),
+                                                                    data: "".to_string(),
+                                                                },
                                                         },
-                                                        Some(Rvalue::Variable{ ref name, subscript: Some(_),.. }) =>
-                                                            CfgOperand{
-                                                                kind: "pointer",
-                                                                display: name.to_string(),
-                                                                data: "".to_string(),
-                                                            },
-                                                        _ =>
-                                                            CfgOperand{
-                                                                kind: "pointer",
-                                                                display: "?".to_string(),
-                                                                data: "".to_string(),
-                                                            },
-                                                    },
-                                            });
-                                            let cmnt = proj.comments.get(&(fun.region.clone(),x.area.start)).unwrap_or(&"".to_string()).clone();
-                                            Some(CfgMnemonic{
-                                                opcode: x.opcode.clone(),
-                                                args: args.collect(),
-                                                region: fun.region.clone(),
-                                                offset: x.area.start,
-                                                comment: cmnt,
-                                            })
-                                        }
-                                    });
-                                    Some((to_ident(lb.unwrap()),mnes.collect()))
-                                },
-                                _ => None,
-                            }
-                        });
-                        let targets = cfg.vertices().filter_map(|x| {
-                            let lb = cfg.vertex_label(x);
-                            match lb {
-                                Some(&ControlFlowTarget::Unresolved(ref rv)) =>
-                                    Some((to_ident(lb.unwrap()),format!("{}",rv))),
-                                _ => None,
-                            }
-                        });
-                        let errors = cfg.vertices().filter_map(|x| {
-                            let lb = cfg.vertex_label(x);
-                            match lb {
-                                Some(&ControlFlowTarget::Failed(_,ref msg)) =>
-                                    Some((to_ident(lb.unwrap()),format!("{}",msg))),
-                                _ => None,
-                            }
-                        });
+                                        });
+                                        let cmnt = sess.project.comments.get(&(fun.region.clone(),x.area.start)).unwrap_or(&"".to_string()).clone();
+                                        Some(CfgMnemonic{
+                                            opcode: x.opcode.clone(),
+                                            args: args.collect(),
+                                            region: fun.region.clone(),
+                                            offset: x.area.start,
+                                            comment: cmnt,
+                                        })
+                                    }
+                                });
+                                Some((to_ident(lb.unwrap()),mnes.collect()))
+                            },
+                            _ => None,
+                        }
+                    });
+                    let targets = cfg.vertices().filter_map(|x| {
+                        let lb = cfg.vertex_label(x);
+                        match lb {
+                            Some(&ControlFlowTarget::Unresolved(ref rv)) =>
+                                Some((to_ident(lb.unwrap()),format!("{}",rv))),
+                            _ => None,
+                        }
+                    });
+                    let errors = cfg.vertices().filter_map(|x| {
+                        let lb = cfg.vertex_label(x);
+                        match lb {
+                            Some(&ControlFlowTarget::Failed(_,ref msg)) =>
+                                Some((to_ident(lb.unwrap()),format!("{}",msg))),
+                            _ => None,
+                        }
+                    });
 
 
-                        // control flow edges
-                        let edges = cfg.edges().filter_map(|x| {
-                            let from = cfg.source(x);
-                            let to = cfg.target(x);
-                            let from_ident = cfg.vertex_label(from).map(to_ident);
-                            let to_ident = cfg.vertex_label(to).map(to_ident);
+                    // control flow edges
+                    let edges = cfg.edges().filter_map(|x| {
+                        let from = cfg.source(x);
+                        let to = cfg.target(x);
+                        let from_ident = cfg.vertex_label(from).map(to_ident);
+                        let to_ident = cfg.vertex_label(to).map(to_ident);
 
-                            if let (Some(f),Some(t)) = (from_ident,to_ident) {
-                                Some(CfgEdge{ from: f, to: t })
-                            } else {
-                                None
-                            }
-                        }).collect();
+                        if let (Some(f),Some(t)) = (from_ident,to_ident) {
+                            Some(CfgEdge{ from: f, to: t })
+                        } else {
+                            None
+                        }
+                    }).collect();
 
-                        return_json(Ok(ControlFlowGraph {
-                            entry_point: entry,
-                            nodes: nodes,
-                            edges: edges,
-                            code: HashMap::from_iter(code),
-                            targets: HashMap::from_iter(targets),
-                            errors: HashMap::from_iter(errors),
-                        }))
-                    } else {
-                        return_json::<()>(Err("This function is unresolved".into()))
-                    }
+                    return_json(Ok(ControlFlowGraph {
+                        entry_point: entry,
+                        nodes: nodes,
+                        edges: edges,
+                        code: HashMap::from_iter(code),
+                        targets: HashMap::from_iter(targets),
+                        errors: HashMap::from_iter(errors),
+                    }))
                 } else {
                     return_json::<()>(Err("No function found for this UUID".into()))
                 }
@@ -399,14 +390,15 @@ pub fn control_flow_graph(arg: &Variant) -> Variant {
         return_json::<()>(Err("1st argument is not a string".into()))
     })
 }
-
 pub fn approximate(arg: &Variant) -> Variant {
+/*
     Variant::String(if let &Variant::String(ref uuid_str) = arg {
         if let Some(tgt_uuid) = Uuid::parse_str(uuid_str).ok() {
-            let ret = Controller::read(|proj| {
+            let ret = Controller::read(|sess| {
+                let root = proj.data.dependencies.vertex_label(proj.data.root).unwrap();
                 if let Some((vx,prog)) = proj.find_call_target_by_uuid(&tgt_uuid) {
                     if let Some(&CallTarget::Concrete(ref fun)) = prog.call_graph.vertex_label(vx) {
-                        return_json(panopticon::approximate::<Kset>(&fun).and_then(|x| Ok(x.iter().filter_map(|(k,v)| {
+                        return_json(panopticon::approximate::<Kset>(&fun,Some(root),&HashMap::new(),&HashMap::new()).and_then(|x| Ok(x.iter().filter_map(|(k,v)| {
                             if let &Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = k {
                                 if let &Kset::Set(ref s) = v {
                                     if s.len() == 1 {
@@ -432,9 +424,9 @@ pub fn approximate(arg: &Variant) -> Variant {
         } else {
             return_json::<String>(Err("1st argument is not a valid UUID".into()))
         }
-    } else {
-        return_json::<String>(Err("1st argument is not a string".into()))
-    })
+    } else {*/
+        Variant::String(return_json::<String>(Err("1st argument is not a string".into())))
+    //})
 }
 
 #[derive(Clone,RustcEncodable)]
@@ -831,8 +823,10 @@ pub fn layout(arg0: &Variant, arg1: &Variant, arg2: &Variant, arg3: &Variant, ar
 
     if let &Variant::String(ref st) = arg0 {
         if let Some(uuid) = Uuid::parse_str(st).ok() {
-            let ret = Controller::read(|proj| {
-                if let Some(func) = proj.find_function_by_uuid(&uuid) {
+            let ret = Controller::read(|sess| {
+                if let Some((_,(func_ref,_))) = sess.project.find_function_by_uuid(&uuid) {
+                    let func_guard = func_ref.read();
+                    let func = &*func_guard;
                     let vertices = func.cflow_graph.vertices().collect::<Vec<_>>();
                     let edges = func.cflow_graph.edges().map(|e| {
                         let f = vertices.iter().position(|&x| x == func.cflow_graph.source(e)).unwrap();
@@ -841,7 +835,7 @@ pub fn layout(arg0: &Variant, arg1: &Variant, arg2: &Variant, arg3: &Variant, ar
                     }).collect::<Vec<_>>();
                     let mut dims_transformed = HashMap::<usize,(f32,f32)>::new();
                     let mut unseen_verts = HashSet::<_>::from_iter(vertices.iter().map(|v|
-                        to_ident(func.cflow_graph.vertex_label(*v).unwrap())));
+                                                                                       to_ident(func.cflow_graph.vertex_label(*v).unwrap())));
 
                     for (k,v) in dims.iter() {
                         let _k = vertices.iter().position(|&x| {
@@ -942,19 +936,16 @@ pub fn comment(arg0: &Variant, arg1: &Variant, arg2: &Variant) -> Variant {
     };
 
     // write comment
-    Variant::String(return_json(Controller::modify(|proj| {
-        proj.comments.insert((reg.clone(),offset),cmnt);
-    }).and(Controller::read(|proj| {
-        for prog in proj.code.iter() {
-            for ct in prog.call_graph.vertices() {
-                match prog.call_graph.vertex_label(ct) {
-                    Some(&CallTarget::Concrete(ref func)) => {
-                        if func.region == reg {
-                            // XXX: check offset?
-                            try!(Controller::emit(CHANGED_FUNCTION,&func.uuid.to_string()));
-                        }
-                    },
-                    _ => {},
+    Variant::String(return_json(Controller::modify(|sess| {
+        sess.project.comments.insert((reg.clone(),offset),cmnt);
+    }).and(Controller::read(|sess| {
+        for prog in sess.project.code.iter() {
+            for (_,&(ref func_ref,_)) in prog.functions.iter() {
+                let func = &*func_ref.read();
+
+                if func.region == reg {
+                    // XXX: check offset?
+                    try!(Controller::emit(CHANGED_FUNCTION,&func.uuid.to_string()));
                 }
             }
         }
@@ -971,9 +962,10 @@ pub fn rename(arg0: &Variant, arg1: &Variant) -> Variant {
 
     let maybe_uu = if let &Variant::String(ref st) = arg0 {
         if let Some(uuid) = Uuid::parse_str(st).ok() {
-            Controller::modify(|proj| {
-                if let Some(func) = proj.find_function_by_uuid_mut(&uuid) {
-                    func.name = name;
+            Controller::modify(|sess| {
+                if let Some((_,(func_ref,_))) = sess.project.find_function_by_uuid_mut(&uuid) {
+                    let mut func_guard = func_ref.write();
+                    func_guard.name = name;
                     Some(uuid.clone())
                 } else {
                     None

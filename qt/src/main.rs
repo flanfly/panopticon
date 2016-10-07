@@ -33,6 +33,8 @@ extern crate chrono;
 extern crate chrono_humanize;
 extern crate goblin;
 extern crate clap;
+extern crate rayon;
+extern crate parking_lot;
 
 #[cfg(unix)]
 extern crate xdg;
@@ -45,6 +47,7 @@ mod project;
 mod function;
 mod sugiyama;
 mod paths;
+mod pipeline;
 
 use clap::{
     App,
@@ -68,6 +71,10 @@ fn main() {
     use std::env;
 
     env_logger::init().unwrap();
+    rayon::initialize(
+        rayon::Configuration::new().
+        set_num_threads(1)
+    ).unwrap();
 
     if cfg!(unix) {
         // workaround bug #165
