@@ -32,6 +32,8 @@ extern crate byteorder;
 extern crate chrono;
 extern crate chrono_humanize;
 extern crate goblin;
+extern crate rayon;
+extern crate parking_lot;
 
 #[cfg(unix)]
 extern crate xdg;
@@ -44,6 +46,7 @@ mod project;
 mod function;
 mod sugiyama;
 mod paths;
+mod pipeline;
 
 use qmlrs::{Variant};
 

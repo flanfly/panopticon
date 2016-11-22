@@ -1,0 +1,10 @@
+digraph G {
+disassm -> callgraph [label="new call"]
+disassm -> dataflow [label="new code"]
+dataflow -> analysis
+dataflow -> dataflow  [label="new reads/writes for callees"]
+analysis -> analysis [label="reads of call"]
+callgraph -> dataflow [label="new edges"]
+analysis -> disassm [label="resolved jumps"]
+analysis -> callgraph [label="resolved calls"]
+}

@@ -395,6 +395,12 @@ impl Display for Guard {
     }
 }
 
+#[derive(Debug,Clone,Copy,PartialEq,Eq,RustcEncodable,RustcDecodable)]
+pub enum Endianess {
+    Little,
+    Big,
+}
+
 /// A RREIL operation.
 #[derive(Clone,PartialEq,Eq,Debug,RustcEncodable,RustcDecodable)]
 pub enum Operation<V: Clone + PartialEq + Eq + Debug + Encodable + Decodable> {
@@ -444,27 +450,36 @@ pub enum Operation<V: Clone + PartialEq + Eq + Debug + Encodable + Decodable> {
     SignExtend(usize,V),
     /// Copies the operand without modification.
     Move(V),
-    /// Calls the function located at the address pointed to by the operand.
-    Call(V),
+    /// Initializes a global variable.
+    Initialize(Cow<'static,str>,usize),
     /// Copies only a range of bit from the operand.
     Select(usize,V,V),
 
     /// Reads a memory cell
-    Load(Cow<'static,str>,V),
+    Load(Cow<'static,str>,Endianess,usize,V),
     /// Writes a memory cell
-    Store(Cow<'static,str>,V),
+    Store(Cow<'static,str>,Endianess,usize,V),
 
     /// SSA Phi function
     Phi(Vec<V>),
 }
 
-/// A single RREIL statement.
 #[derive(Clone,PartialEq,Eq,Debug,RustcEncodable,RustcDecodable)]
-pub struct Statement {
-    /// Value that the operation result is assigned to
-    pub assignee: Lvalue,
-    /// Operation and its arguments
-    pub op: Operation<Rvalue>,
+pub enum Statement {
+    /// A single RREIL statement.
+    Simple{
+        /// Value that the operation result is assigned to
+        assignee: Lvalue,
+        /// Operation and its arguments
+        op: Operation<Rvalue>,
+    },
+    /// Function call
+    Call{
+        /// Call target
+        target: Rvalue,
+        reads: Vec<Rvalue>,
+        writes: Vec<Lvalue>,
+    }
 }
 
 impl Statement {
@@ -511,68 +526,96 @@ impl Statement {
         };
 
         try!(match self {
-            &Statement{ op: Operation::Add(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::Subtract(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::Multiply(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::DivideUnsigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::DivideSigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::ShiftLeft(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::ShiftRightUnsigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::ShiftRightSigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::Modulo(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::And(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::ExclusiveOr(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
-            &Statement{ op: Operation::InclusiveOr(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::Add(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::Subtract(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::Multiply(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::DivideUnsigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::DivideSigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::ShiftLeft(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::ShiftRightUnsigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::ShiftRightSigned(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::Modulo(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::And(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::ExclusiveOr(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
+            &Statement::Simple{ op: Operation::InclusiveOr(ref a,ref b), ref assignee } => typecheck_binop(a,b,assignee),
 
-            &Statement{ op: Operation::Equal(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
-            &Statement{ op: Operation::LessOrEqualUnsigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
-            &Statement{ op: Operation::LessOrEqualSigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
-            &Statement{ op: Operation::LessUnsigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
-            &Statement{ op: Operation::LessSigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
+            &Statement::Simple{ op: Operation::Equal(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
+            &Statement::Simple{ op: Operation::LessOrEqualUnsigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
+            &Statement::Simple{ op: Operation::LessOrEqualSigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
+            &Statement::Simple{ op: Operation::LessUnsigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
+            &Statement::Simple{ op: Operation::LessSigned(ref a,ref b), ref assignee } => typecheck_cmpop(a,b,assignee),
 
-            &Statement{ op: Operation::SignExtend(ref a,ref b), ref assignee } => typecheck_unop(b,Some(*a),assignee),
-            &Statement{ op: Operation::ZeroExtend(ref a,ref b), ref assignee } => typecheck_unop(b,Some(*a),assignee),
-            &Statement{ op: Operation::Move(ref a), ref assignee } => typecheck_unop(a,None,assignee),
-            &Statement{ op: Operation::Select(ref off,ref a,ref b), ref assignee } =>
+            &Statement::Simple{ op: Operation::SignExtend(ref a,ref b), ref assignee } => typecheck_unop(b,Some(*a),assignee),
+            &Statement::Simple{ op: Operation::ZeroExtend(ref a,ref b), ref assignee } => typecheck_unop(b,Some(*a),assignee),
+            &Statement::Simple{ op: Operation::Move(ref a), ref assignee } => typecheck_unop(a,None,assignee),
+            &Statement::Simple{ op: Operation::Initialize(ref a,ref sz), ref assignee } =>
+                if !(assignee.size() == None || assignee.size() == Some(*sz)) {
+                    return Err("Operation result and assingnee sizes mismatch".into())
+                } else {
+                    Ok(())
+                },
+
+            &Statement::Simple{ op: Operation::Select(ref off,ref a,ref b), ref assignee } =>
                 if !(assignee.size() == a.size() && *off + b.size().unwrap_or(0) <= a.size().unwrap_or(0)) {
                     return Err("Ill-sized Select operation".into());
                 } else {
                     Ok(())
                 },
 
-            &Statement{ op: Operation::Call(_), ref assignee } =>
-                if !(assignee == &Lvalue::Undefined) {
-                    return Err("Call operation can only be assigned to Undefined".into());
+            &Statement::Simple{ op: Operation::Load(_,_,ref sz,_), ref assignee } =>
+                if assignee.size() != Some(*sz) {
+                    return Err("Memory operation with undefined size".into());
+                } else if *sz == 0 {
+                    return Err("Memory operation of size 0".into());
+                } else if *sz % 8 != 0 {
+                    return Err("Memory operation not byte aligned".into());
+                } else {
+                    Ok(())
+                },
+            &Statement::Simple{ op: Operation::Store(_,_,ref sz,_), ref assignee } =>
+                if assignee.size() != Some(*sz) {
+                    return Err("Memory operation with undefined size".into());
+                } else if *sz == 0 {
+                    return Err("Memory operation of size 0".into());
+                } else if *sz % 8 != 0 {
+                    return Err("Memory operation not byte aligned".into());
                 } else {
                     Ok(())
                 },
 
-            &Statement{ op: Operation::Load(_,_), ref assignee } =>
-                if !(assignee.size().is_some()) {
-                    return Err("Memory operation with undefined size".into());
-                } else {
-                    Ok(())
-                },
-            &Statement{ op: Operation::Store(_,_), ref assignee } =>
-                if !(assignee.size().is_some()) {
-                    return Err("Memory operation with undefined size".into());
-                } else {
-                    Ok(())
-                },
-
-            &Statement{ op: Operation::Phi(ref vec), ref assignee } =>
+            &Statement::Simple{ op: Operation::Phi(ref vec), ref assignee } =>
                 if !(vec.iter().all(|rv| rv.size() == assignee.size()) && assignee.size() != None) {
                     return Err("Phi arguments must have equal sizes and can't be Undefined".into());
                 } else {
                     Ok(())
                 },
+            &Statement::Call{ .. } => Ok(())
         });
 
-        if !(self.op.operands().iter().all(|rv| rv.size() != Some(0)) && self.assignee.size() != Some(0)) {
-            return Err("Operation argument and/or assignee has size 0".into());
+        match self {
+            &Statement::Simple{ ref op, ref assignee } => {
+                if !(op.operands().iter().all(|rv| rv.size() != Some(0)) && assignee.size() != Some(0)) {
+                    return Err("Operation argument and/or assignee has size 0".into());
+                }
+            }
+            _ => {}
         }
 
         Ok(())
+    }
+
+    pub fn assignee(&self) -> Option<&Lvalue> {
+        match self {
+            &Statement::Simple{ ref assignee,.. } => Some(assignee),
+            &Statement::Call{ .. } => None,
+        }
+    }
+
+    pub fn assignee_mut(&mut self) -> Option<&mut Lvalue> {
+        match self {
+            &mut Statement::Simple{ ref mut assignee,.. } => Some(assignee),
+            &mut Statement::Call{ .. } => None,
+        }
     }
 }
 
@@ -881,7 +924,7 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::Move(ref a) =>
             a.clone(),
 
-        Operation::Call(_) =>
+        Operation::Initialize(_,_) =>
             Rvalue::Undefined,
 
         Operation::Select(off,Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: _b, size: _s }) => {
@@ -895,10 +938,10 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::Select(_,_,_) =>
             Rvalue::Undefined,
 
-        Operation::Load(_,_) =>
+        Operation::Load(_,_,_,_) =>
             Rvalue::Undefined,
 
-        Operation::Store(_,_) =>
+        Operation::Store(_,_,_,_) =>
             Rvalue::Undefined,
 
         Operation::Phi(ref vec) =>
@@ -915,8 +958,8 @@ pub fn lift<V: Clone + PartialEq + Eq + Debug + Encodable + Decodable,W: Clone +
     let args = op.operands().iter().cloned().map(m).collect::<Vec<_>>();
     match op {
         &Operation::Phi(_) => Operation::Phi(args),
-        &Operation::Load(ref s,_) => Operation::Load(s.clone(),args[0].clone()),
-        &Operation::Store(ref s,_) => Operation::Store(s.clone(),args[0].clone()),
+        &Operation::Load(ref r,ref en,ref sz,_) => Operation::Load(r.clone(),*en,*sz,args[0].clone()),
+        &Operation::Store(ref r,ref en,ref sz,_) => Operation::Store(r.clone(),*en,*sz,args[0].clone()),
         &Operation::Add(_,_) => Operation::Add(args[0].clone(),args[1].clone()),
         &Operation::Subtract(_,_) => Operation::Subtract(args[0].clone(),args[1].clone()),
         &Operation::Multiply(_,_) => Operation::Multiply(args[0].clone(),args[1].clone()),
@@ -934,8 +977,8 @@ pub fn lift<V: Clone + PartialEq + Eq + Debug + Encodable + Decodable,W: Clone +
         &Operation::LessSigned(_,_) => Operation::LessSigned(args[0].clone(),args[1].clone()),
         &Operation::LessOrEqualUnsigned(_,_) => Operation::LessOrEqualUnsigned(args[0].clone(),args[1].clone()),
         &Operation::LessOrEqualSigned(_,_) => Operation::LessOrEqualSigned(args[0].clone(),args[1].clone()),
-        &Operation::Call(_) => Operation::Call(args[0].clone()),
         &Operation::Move(_) => Operation::Move(args[0].clone()),
+        &Operation::Initialize(ref a,ref sz) => Operation::Initialize(a.clone(),*sz),
         &Operation::Select(ref off, _, _) => Operation::Select(*off,args[0].clone(),args[1].clone()),
         &Operation::ZeroExtend(ref sz, _) => Operation::ZeroExtend(*sz,args[0].clone()),
         &Operation::SignExtend(ref sz,_) => Operation::SignExtend(*sz,args[0].clone()),
@@ -968,11 +1011,11 @@ impl<'a,V> Operation<V> where V: Clone + PartialEq + Eq + Debug + Encodable + De
             Operation::ZeroExtend(_,ref a) => return vec!(a),
             Operation::SignExtend(_,ref a) => return vec!(a),
             Operation::Move(ref a) => return vec!(a),
-            Operation::Call(ref a) => return vec!(a),
+            Operation::Initialize(_,_) => return vec!(),
             Operation::Select(_,ref a,ref b) => return vec!(a,b),
 
-            Operation::Load(_,ref b) => return vec!(b),
-            Operation::Store(_,ref b) => return vec!(b),
+            Operation::Load(_,_,_,ref b) => return vec!(b),
+            Operation::Store(_,_,_,ref b) => return vec!(b),
 
             Operation::Phi(ref vec) => return vec.iter().collect(),
         }
@@ -1003,11 +1046,11 @@ impl<'a,V> Operation<V> where V: Clone + PartialEq + Eq + Debug + Encodable + De
             &mut Operation::ZeroExtend(_,ref mut a) => return vec!(a),
             &mut Operation::SignExtend(_,ref mut a) => return vec!(a),
             &mut Operation::Move(ref mut a) => return vec!(a),
-            &mut Operation::Call(ref mut a) => return vec!(a),
+            &mut Operation::Initialize(_,_) => return vec!(),
             &mut Operation::Select(_,ref mut a,ref mut b) => return vec!(a,b),
 
-            &mut Operation::Load(_,ref mut b) => return vec!(b),
-            &mut Operation::Store(_,ref mut b) => return vec!(b),
+            &mut Operation::Load(_,_,_,ref mut b) => return vec!(b),
+            &mut Operation::Store(_,_,_,ref mut b) => return vec!(b),
 
             &mut Operation::Phi(ref mut vec) => return vec.iter_mut().collect(),
         }
@@ -1016,43 +1059,48 @@ impl<'a,V> Operation<V> where V: Clone + PartialEq + Eq + Debug + Encodable + De
 
 impl Display for Statement {
     fn fmt(&self, f: &mut Formatter) -> result::Result<(), Error> {
-        match self.op {
-            Operation::Add(ref a,ref b) => f.write_fmt(format_args!("add {}, {}, {}",self.assignee,a,b)),
-            Operation::Subtract(ref a,ref b) => f.write_fmt(format_args!("sub {}, {}, {}",self.assignee,a,b)),
-            Operation::Multiply(ref a,ref b) => f.write_fmt(format_args!("mul {}, {}, {}",self.assignee,a,b)),
-            Operation::DivideUnsigned(ref a,ref b) => f.write_fmt(format_args!("divu {}, {}, {}",self.assignee,a,b)),
-            Operation::DivideSigned(ref a,ref b) => f.write_fmt(format_args!("divs {}, {}, {}",self.assignee,a,b)),
-            Operation::ShiftLeft(ref a,ref b) => f.write_fmt(format_args!("shl {}, {}, {}",self.assignee,a,b)),
-            Operation::ShiftRightUnsigned(ref a,ref b) => f.write_fmt(format_args!("shru {}, {}, {}",self.assignee,a,b)),
-            Operation::ShiftRightSigned(ref a,ref b) => f.write_fmt(format_args!("shrs {}, {}, {}",self.assignee,a,b)),
-            Operation::Modulo(ref a,ref b) => f.write_fmt(format_args!("mod {}, {}, {}",self.assignee,a,b)),
-            Operation::And(ref a,ref b) => f.write_fmt(format_args!("and {}, {}, {}",self.assignee,a,b)),
-            Operation::InclusiveOr(ref a,ref b) => f.write_fmt(format_args!("or {}, {}, {}",self.assignee,a,b)),
-            Operation::ExclusiveOr(ref a,ref b) => f.write_fmt(format_args!("xor {}, {}, {}",self.assignee,a,b)),
+        match self {
+            &Statement::Simple{ ref op, ref assignee } => match *op {
+                Operation::Add(ref a,ref b) => f.write_fmt(format_args!("add {}, {}, {}",assignee,a,b)),
+                Operation::Subtract(ref a,ref b) => f.write_fmt(format_args!("sub {}, {}, {}",assignee,a,b)),
+                Operation::Multiply(ref a,ref b) => f.write_fmt(format_args!("mul {}, {}, {}",assignee,a,b)),
+                Operation::DivideUnsigned(ref a,ref b) => f.write_fmt(format_args!("divu {}, {}, {}",assignee,a,b)),
+                Operation::DivideSigned(ref a,ref b) => f.write_fmt(format_args!("divs {}, {}, {}",assignee,a,b)),
+                Operation::ShiftLeft(ref a,ref b) => f.write_fmt(format_args!("shl {}, {}, {}",assignee,a,b)),
+                Operation::ShiftRightUnsigned(ref a,ref b) => f.write_fmt(format_args!("shru {}, {}, {}",assignee,a,b)),
+                Operation::ShiftRightSigned(ref a,ref b) => f.write_fmt(format_args!("shrs {}, {}, {}",assignee,a,b)),
+                Operation::Modulo(ref a,ref b) => f.write_fmt(format_args!("mod {}, {}, {}",assignee,a,b)),
+                Operation::And(ref a,ref b) => f.write_fmt(format_args!("and {}, {}, {}",assignee,a,b)),
+                Operation::InclusiveOr(ref a,ref b) => f.write_fmt(format_args!("or {}, {}, {}",assignee,a,b)),
+                Operation::ExclusiveOr(ref a,ref b) => f.write_fmt(format_args!("xor {}, {}, {}",assignee,a,b)),
 
-            Operation::Equal(ref a,ref b) => f.write_fmt(format_args!("cmpeq {}, {}, {}",self.assignee,a,b)),
-            Operation::LessOrEqualUnsigned(ref a,ref b) => f.write_fmt(format_args!("cmpleu {}, {}, {}",self.assignee,a,b)),
-            Operation::LessOrEqualSigned(ref a,ref b) => f.write_fmt(format_args!("cmples {}, {}, {}",self.assignee,a,b)),
-            Operation::LessUnsigned(ref a,ref b) => f.write_fmt(format_args!("cmplu {}, {}, {}",self.assignee,a,b)),
-            Operation::LessSigned(ref a,ref b) => f.write_fmt(format_args!("cmpls {}, {}, {}",self.assignee,a,b)),
+                Operation::Equal(ref a,ref b) => f.write_fmt(format_args!("cmpeq {}, {}, {}",assignee,a,b)),
+                Operation::LessOrEqualUnsigned(ref a,ref b) => f.write_fmt(format_args!("cmpleu {}, {}, {}",assignee,a,b)),
+                Operation::LessOrEqualSigned(ref a,ref b) => f.write_fmt(format_args!("cmples {}, {}, {}",assignee,a,b)),
+                Operation::LessUnsigned(ref a,ref b) => f.write_fmt(format_args!("cmplu {}, {}, {}",assignee,a,b)),
+                Operation::LessSigned(ref a,ref b) => f.write_fmt(format_args!("cmpls {}, {}, {}",assignee,a,b)),
 
-            Operation::ZeroExtend(s,ref a) => f.write_fmt(format_args!("convert_{} {}, {}",s,self.assignee,a)),
-            Operation::SignExtend(s,ref a) => f.write_fmt(format_args!("sign-extend_{} {}, {}",s,self.assignee,a)),
-            Operation::Select(s,ref a,ref b) => f.write_fmt(format_args!("select_{} {}, {}, {}",s,self.assignee,a,b)),
-            Operation::Move(ref a) => f.write_fmt(format_args!("mov {}, {}",self.assignee,a)),
-            Operation::Call(ref a) => f.write_fmt(format_args!("call {}, {}",self.assignee,a)),
+                Operation::ZeroExtend(s,ref a) => f.write_fmt(format_args!("convert_{} {}, {}",s,assignee,a)),
+                Operation::SignExtend(s,ref a) => f.write_fmt(format_args!("sign-extend_{} {}, {}",s,assignee,a)),
+                Operation::Select(s,ref a,ref b) => f.write_fmt(format_args!("select_{} {}, {}, {}",s,assignee,a,b)),
+                Operation::Move(ref a) => f.write_fmt(format_args!("mov {}, {}",assignee,a)),
+                Operation::Initialize(_,_) => f.write_fmt(format_args!("init {}",assignee)),
 
-            Operation::Load(ref r,ref b) => f.write_fmt(format_args!("load_{} {}, {}",r,self.assignee,b)),
-            Operation::Store(ref r,ref b) => f.write_fmt(format_args!("store_{} {}, {}",r,self.assignee,b)),
+                Operation::Load(ref r,Endianess::Little,ref sz,ref b) => f.write_fmt(format_args!("load_{}/le/{} {}, {}",r,sz,assignee,b)),
+                Operation::Load(ref r,Endianess::Big,ref sz,ref b) => f.write_fmt(format_args!("load_{}/be/{} {}, {}",r,sz,assignee,b)),
+                Operation::Store(ref r,Endianess::Little,ref sz,ref b) => f.write_fmt(format_args!("store_{}/le/{} {}, {}",r,sz,assignee,b)),
+                Operation::Store(ref r,Endianess::Big,ref sz,ref b) => f.write_fmt(format_args!("store_{}/be/{} {}, {}",r,sz,assignee,b)),
 
-            Operation::Phi(ref vec) => {
-                try!(f.write_fmt(format_args!("phi {}",self.assignee)));
-                for (i,x) in vec.iter().enumerate() {
-                    try!(f.write_fmt(format_args!("{}",x)));
-                    if i < vec.len() - 1 { try!(f.write_str(", ")); }
-                }
-                Ok(())
+                Operation::Phi(ref vec) => {
+                    try!(f.write_fmt(format_args!("phi {}",assignee)));
+                    for (i,x) in vec.iter().enumerate() {
+                        try!(f.write_fmt(format_args!("{}",x)));
+                        if i < vec.len() - 1 { try!(f.write_str(", ")); }
+                    }
+                    Ok(())
+                },
             },
+            &Statement::Call{ ref target,.. } => f.write_fmt(format_args!("call {}",target)),
         }
     }
 }
@@ -1083,10 +1131,10 @@ macro_rules! rreil {
     ( sext / $sz:tt $($cdr:tt)* ) => { rreil_extop!(SignExtend # $sz # $($cdr)*) };
     ( zext / $sz:tt $($cdr:tt)* ) => { rreil_extop!(ZeroExtend # $sz # $($cdr)*) };
     ( mov $($cdr:tt)* ) => { rreil_unop!(Move # $($cdr)*) };
-    ( call $($cdr:tt)* ) => { rreil_unop!(Call # $($cdr)*) };
+    ( call $($cdr:tt)* ) => { rreil_callop!($($cdr)*) };
 
-    ( load / $r:ident   $($cdr:tt)* ) => { rreil_memop!(Load # $r # $($cdr)*) };
-    ( store / $r:ident $($cdr:tt)* ) => { rreil_memop!(Store # $r # $($cdr)*) };
+    ( load / $r:ident / $en:ident / $sz:tt $($cdr:tt)* ) => { rreil_memop!(Load # $r # $en # $sz # $($cdr)*) };
+    ( store / $r:ident / $en:ident / $sz:tt $($cdr:tt)* ) => { rreil_memop!(Store # $r # $en # $sz # $($cdr)*) };
 }
 
 include!("rreil.rs");
@@ -1209,8 +1257,8 @@ mod tests {
         };
 
         let _ = rreil!{
-            store/ram rax:32, [0]:32;
-            load/ram rax:32, [0]:32;
+            store/ram/le/32 rax:32, [0]:32;
+            load/ram/le/32 rax:32, [0]:32;
         };
 
         let _ = rreil!{
@@ -1222,35 +1270,35 @@ mod tests {
 
     fn setup() -> Vec<Statement> {
         vec![
-            Statement{ op: Operation::Add(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Subtract(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Multiply(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::DivideUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::DivideSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::ShiftLeft(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::ShiftRightUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::ShiftRightSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Modulo(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::InclusiveOr(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::ExclusiveOr(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::And(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Add(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Subtract(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Multiply(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::DivideUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::DivideSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::ShiftLeft(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::ShiftRightUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::ShiftRightSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Modulo(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::InclusiveOr(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::ExclusiveOr(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::And(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
 
-            Statement{ op: Operation::Equal(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::LessOrEqualUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::LessOrEqualSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::LessUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::LessSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Equal(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::LessOrEqualUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::LessOrEqualSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::LessUnsigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::LessSigned(Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
 
-            Statement{ op: Operation::ZeroExtend(32,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::SignExtend(32,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Select(8,Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Move(Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Call(Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::ZeroExtend(32,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::SignExtend(32,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Select(8,Rvalue::Undefined,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Move(Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Initialize("test".into(),16), assignee: Lvalue::Undefined },
 
-            Statement{ op: Operation::Load(Cow::Borrowed("ram"),Rvalue::Undefined), assignee: Lvalue::Undefined },
-            Statement{ op: Operation::Store(Cow::Borrowed("ram"),Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Load(Cow::Borrowed("ram"),Endianess::Little,32,Rvalue::Undefined), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Store(Cow::Borrowed("ram"),Endianess::Little,32,Rvalue::Undefined), assignee: Lvalue::Undefined },
 
-            Statement{ op: Operation::Phi(vec![Rvalue::Undefined,Rvalue::Undefined]), assignee: Lvalue::Undefined },
+            Statement::Simple{ op: Operation::Phi(vec![Rvalue::Undefined,Rvalue::Undefined]), assignee: Lvalue::Undefined },
         ]
     }
 
@@ -1264,7 +1312,7 @@ mod tests {
     #[test]
     fn operands() {
         for mut x in setup() {
-            let Statement{ ref mut op,.. } = x;
+            let Statement::Simple{ ref mut op,.. } = x;
             op.operands();
             op.operands_mut();
         }

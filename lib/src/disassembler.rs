@@ -144,6 +144,8 @@ pub trait Architecture: Clone
 
     /// Start to disassemble a single Opcode inside a given region at a given address.
     fn decode(&Region,u64,&Self::Configuration) -> Result<Match<Self>>;
+
+    fn registers(&Self::Configuration) -> Result<&'static[&'static str]>;
 }
 
 /// Result of a single disassembly operation.

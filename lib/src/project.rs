@@ -42,6 +42,7 @@ use {
     CallGraphRef,
     Region,World,
     Function,
+    FunctionRef,
     Result,
     pe
 };
@@ -114,10 +115,10 @@ impl Project {
     }
 
     /// Returns function and enclosing program with UUID `uu`
-    pub fn find_function_by_uuid<'a>(&'a self,uu: &Uuid) -> Option<&'a Function> {
+    pub fn find_function_by_uuid<'a>(&'a self,uu: &Uuid) -> Option<(&'a Program,FunctionRef)> {
         for p in self.code.iter() {
             if let Some(f) = p.find_function_by_uuid::<'a>(uu) {
-                return Some(f);
+                return Some((p,f));
             }
         }
 
@@ -125,16 +126,16 @@ impl Project {
     }
 
     /// Returns function and enclosing program with UUID `uu`
-    pub fn find_function_by_uuid_mut<'a>(&'a mut self,uu: &Uuid) -> Option<&'a mut Function> {
+    pub fn find_function_by_uuid_mut<'a>(&'a mut self,uu: &Uuid) -> Option<(&'a mut Program,FunctionRef)> {
         for p in self.code.iter_mut() {
             if let Some(f) = p.find_function_by_uuid_mut::<'a>(uu) {
-                return Some(f);
+                return Some((p,f));
             }
         }
 
         None
     }
-
+/*
     /// Returns function/reference and enclosing program with UUID `uu`
     pub fn find_call_target_by_uuid<'a>(&'a self,uu: &Uuid) -> Option<(CallGraphRef,&'a Program)> {
         for p in self.code.iter() {
@@ -156,7 +157,7 @@ impl Project {
 
         None
     }
-
+*/
     /// Serializes the project into the file at `p`. The format looks like this:
     /// [u8;10] magic = "PANOPTICON"
     /// u32     version = 0

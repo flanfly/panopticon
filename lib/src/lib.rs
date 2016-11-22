@@ -91,6 +91,7 @@ extern crate lazy_static;
 
 extern crate byteorder;
 extern crate goblin;
+extern crate parking_lot;
 
 // core
 pub mod disassembler;
@@ -109,6 +110,7 @@ pub use il::{
     Guard,
     Statement,
     Operation,
+    Endianess,
     execute,
     lift,
 };
@@ -135,6 +137,7 @@ pub use function::{
 
 pub mod program;
 pub use program::{
+    FunctionRef,
     Program,
     CallTarget,
     CallGraph,
@@ -168,9 +171,14 @@ pub use dataflow::*;
 
 pub mod abstractinterp;
 pub use abstractinterp::{
-    Kset,
     approximate,
+    Avalue,
+    Constraint,
+    ProgramPoint,
+    addrtrack,
 };
+pub use abstractinterp::kset::Kset;
+pub use abstractinterp::addrtrack::BoundedAddrTrack;
 
 // disassembler
 pub mod avr;

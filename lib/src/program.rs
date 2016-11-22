@@ -28,6 +28,10 @@
 //! function fails, it will still be added to the call graph. The function will only have a single
 //! error node.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use graph_algos::{
     AdjacencyList,
     GraphTrait,
@@ -37,6 +41,8 @@ use graph_algos::{
 };
 use graph_algos::adjacency_list::AdjacencyListVertexDescriptor;
 use uuid::Uuid;
+use rustc_serialize::{Decoder,Decodable,Encoder,Encodable};
+use parking_lot::RwLock;
 
 use {
     ControlFlowTarget,
@@ -48,22 +54,9 @@ use {
 #[derive(RustcDecodable,RustcEncodable)]
 pub enum CallTarget {
     /// Resolved and disassembled function.
-    Concrete(Function),
-    /// Reference to an external symbol.
-    Symbolic(String,Uuid),
-    /// Resolved but not yet disassembled function.
-    Todo(Rvalue,Option<String>,Uuid),
-}
-
-impl CallTarget {
-    /// Returns the UUID of the call graph node.
-    pub fn uuid(&self) -> Uuid {
-        match self {
-            &CallTarget::Concrete(Function{ uuid,..}) => uuid,
-            &CallTarget::Symbolic(_,uuid) => uuid,
-            &CallTarget::Todo(_,_,uuid) => uuid,
-        }
-    }
+    Function(Uuid),
+    // Resolved but not yet disassembled function.
+    //Todo{ address: Rvalue, name: Option<Cow<'static,str>> },
 }
 
 /// Graph of functions/symbolic references
@@ -71,73 +64,135 @@ pub type CallGraph = AdjacencyList<CallTarget,()>;
 /// Stable reference to a call graph node
 pub type CallGraphRef = AdjacencyListVertexDescriptor;
 
+pub type FunctionRef = (Arc<RwLock<Function>>,CallGraphRef);
+
 /// A collection of functions calling each other.
-#[derive(RustcDecodable,RustcEncodable)]
 pub struct Program {
     /// Unique, immutable identifier
     pub uuid: Uuid,
     /// Human-readable name
-    pub name: String,
+    pub name: Cow<'static,str>,
     /// Graph of functions
     pub call_graph: CallGraph,
+    pub functions: HashMap<Uuid,FunctionRef>,
+    pub symbolic: HashMap<u64,u64>,
+}
+
+impl Decodable for Program {
+    fn decode<D: Decoder>(d: &mut D) -> Result<Program, D::Error> {
+        d.read_struct("Program", 5, |d| {
+            let uuid = try!(d.read_struct_field("uuid", 0, |d| { Uuid::decode(d) }));
+            let name = try!(d.read_struct_field("name", 1, |d| { Cow::decode(d) }));
+            let mut call_graph = try!(d.read_struct_field("call_graph", 2, |d| { CallGraph::decode(d) }));
+            let functions = try!(d.read_struct_field("functions", 3, |d| {
+                d.read_seq(|d,sz| {
+                    let mut map = HashMap::new();
+
+                    for idx in 0..sz {
+                        let func = try!(d.read_seq_elt(idx,|d| Function::decode(d)));
+                        let maybe_vx = call_graph.vertices().find(|&vx| {
+                            let maybe_lb = call_graph.vertex_label(vx);
+                            if let Some(&CallTarget::Function(uuid)) = maybe_lb {
+                                uuid == func.uuid
+                            } else {
+                                false
+                            }
+                        });
+
+                        if let Some(vx) = maybe_vx {
+                            map.insert(func.uuid,(Arc::new(RwLock::new(func)),vx));
+                        } else {
+                            let vx = call_graph.add_vertex(CallTarget::Function(func.uuid));
+                            map.insert(func.uuid,(Arc::new(RwLock::new(func)),vx));
+                        }
+                    }
+
+                    Ok(map)
+                })
+            }));
+            let symbolic = try!(d.read_struct_field("symbolic", 4, |d| { HashMap::decode(d) }));
+
+            Ok(Program{
+                uuid: uuid,
+                name: name,
+                call_graph: call_graph,
+                functions: functions,
+                symbolic: symbolic
+            })
+        })
+    }
+}
+
+impl Encodable for Program {
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        s.emit_struct("Program", 2, |s| {
+            try!(s.emit_struct_field("uuid", 0, |s| {
+                self.uuid.encode(s)
+            }));
+            try!(s.emit_struct_field("name", 1, |s| {
+                self.name.encode(s)
+            }));
+            try!(s.emit_struct_field("call_graph", 2, |s| {
+                self.call_graph.encode(s)
+            }));
+            try!(s.emit_struct_field("functions", 3, |s| {
+                s.emit_seq(self.functions.len(),|s| {
+                    for (idx,(_,&(ref func,_))) in self.functions.iter().enumerate() {
+                        try!(s.emit_seq_elt(idx,|s| func.read().encode(s)));
+                    }
+
+                    Ok(())
+                })
+            }));
+            try!(s.emit_struct_field("symbolic", 4, |s| {
+                self.symbolic.encode(s)
+            }));
+            Ok(())
+        })
+    }
 }
 
 impl Program {
     /// Create a new, empty `Program` named `n`.
-    pub fn new(n: &str) -> Program {
+    pub fn new(n: Cow<'static,str>) -> Program {
         Program{
             uuid: Uuid::new_v4(),
-            name: n.to_string(),
+            name: n,
             call_graph: CallGraph::new(),
+            functions: HashMap::new(),
+            symbolic: HashMap::new(),
         }
     }
 
     /// Returns a reference to the function with an entry point starting at `a`.
-    pub fn find_function_by_entry(&self, a: u64) -> Option<CallGraphRef> {
-        self.call_graph.vertices().find(|&x| match self.call_graph.vertex_label(x) {
-            Some(&CallTarget::Concrete(ref s)) => {
-                if let Some(e) = s.entry_point {
-                    if let Some(&ControlFlowTarget::Resolved(ref ee)) = s.cflow_graph.vertex_label(e) {
-                        ee.area.start == a
-                    } else {
-                        false
-                    }
+    pub fn find_function_by_entry(&self, a: u64) -> Option<FunctionRef> {
+        self.functions.iter().find(|f| {
+            let func = (f.1).0.read();
+
+            if let Some(entry) = func.entry_point {
+                let cfg = &func.cflow_graph;
+                if let Some(&ControlFlowTarget::Resolved(ref ee)) = cfg.vertex_label(entry) {
+                    ee.area.start == a
                 } else {
                     false
                 }
-            },
-            _ => false
-        })
+            } else {
+                false
+            }
+        }).map(|x| x.1.clone())
     }
 
     /// Returns the function with UUID `a`.
-    pub fn find_function_by_uuid<'a>(&'a self, a: &Uuid) -> Option<&'a Function> {
-        self.call_graph.vertices().find(|&x| match self.call_graph.vertex_label(x) {
-            Some(&CallTarget::Concrete(ref s)) => s.uuid == *a,
-            _ => false,
-        }).and_then(|r| match self.call_graph.vertex_label(r) {
-            Some(&CallTarget::Concrete(ref s)) => Some(s),
-            _ => None
-        })
+    pub fn find_function_by_uuid<'a>(&self, a: &Uuid) -> Option<FunctionRef> {
+        self.functions.get(a).map(|x| x.clone())
     }
 
     /// Returns the function with UUID `a`.
-    pub fn find_function_by_uuid_mut<'a>(&'a mut self, a: &Uuid) -> Option<&'a mut Function> {
-        let ct = self.call_graph.vertices().find(|&x| match self.call_graph.vertex_label(x) {
-            Some(&CallTarget::Concrete(ref s)) => s.uuid == *a,
-            _ => false,
-        });
-
-        if ct.is_none() {
-            return None;
-        }
-
-        match self.call_graph.vertex_label_mut(ct.unwrap()) {
-            Some(&mut CallTarget::Concrete(ref mut s)) => Some(s),
-            _ => None
-        }
+    pub fn find_function_by_uuid_mut<'a>(&'a mut self, a: &Uuid) -> Option<FunctionRef> {
+        self.functions.get_mut(a).map(|x| x.clone())
     }
 
+    /*
     /// Puts function/reference `new_ct` into the call graph, returning the UUIDs of all functions
     /// that are called by `new_ct` and call `new_ct`.
     pub fn insert(&mut self, new_ct: CallTarget) -> Vec<Uuid> {
@@ -218,7 +273,7 @@ impl Program {
         }
 
         None
-    }
+    }*/
 }
 
 #[cfg(test)]
@@ -251,12 +306,14 @@ mod tests {
         func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb0)));
 
         prog.call_graph.add_vertex(CallTarget::Concrete(Function::new("test".to_string(),"ram".to_string())));
-        let vx1 = prog.call_graph.add_vertex(CallTarget::Concrete(func));
+        let vx1 = prog.call_graph.add_vertex(CallTarget::Function(func));
+        prog.functions.insert(func.uuid,(Arc::new(RwLock::new(func)),vx1));
 
-        assert_eq!(prog.find_function_by_entry(0),Some(vx1));
+        assert!(prog.find_function_by_entry(0).is_some());
         assert_eq!(prog.find_function_by_entry(1),None);
     }
 
+    /*
     #[test]
     fn insert_replaces_todo() {
         let uu = Uuid::new_v4();
@@ -302,7 +359,7 @@ mod tests {
 
         let mut func = Function::with_uuid("test3".to_string(),uu2.clone(),"ram".to_string());
         let ops1 = vec![];
-        let i1 = vec![Statement{ op: Operation::Call(Rvalue::new_u64(12)), assignee: Lvalue::Undefined}];
+        let i1 = vec![Statement::Operation{ op: Operation::Call(Rvalue::new_u64(12)), assignee: Lvalue::Undefined}];
         let mne1 = Mnemonic::new(0..10,"call".to_string(),"12".to_string(),ops1.iter(),i1.iter()).ok().unwrap();
         let bb0 = BasicBlock::from_vec(vec!(mne1));
         func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb0)));
@@ -320,4 +377,5 @@ mod tests {
         assert_eq!(prog.call_graph.num_edges(),1);
         assert_eq!(prog.call_graph.num_vertices(),2);
     }
+    */
 }
