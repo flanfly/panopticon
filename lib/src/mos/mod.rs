@@ -45,6 +45,8 @@ pub mod semantic;
 #[derive(Clone,Debug)]
 pub enum Mos {}
 
+const REGISTERS: &'static [&'static str] = &["A","X","Y","SP","PC","N","V","D","I","Z","C"];
+
 impl Architecture for Mos {
     type Token = u8;
     type Configuration = Variant;
@@ -85,6 +87,10 @@ impl Architecture for Mos {
             Err("Unrecognized instruction".into())
         }
     }
+
+   fn registers(_: &Self::Configuration) -> Result<&'static[&'static str]> {
+       Ok(REGISTERS)
+   }
 }
 
 // 8 bit main register
@@ -203,7 +209,7 @@ pub fn zpage(opcode: &'static str,
         st.mnemonic(len,&opcode,"{p:ram}",vec![base.clone()], &|c| -> Result<Vec<Statement>> {
             let mut stmts = try!(rreil!{
                 zext/16 addr:16, (base);
-                load/ram val:8, addr:16;
+                load/ram/be/8 val:8, addr:16;
             });
 
             stmts.append(&mut try!(sem(c, rreil_rvalue!{ val:8 })));
@@ -239,7 +245,7 @@ pub fn zpage_offset(opcode: &'static str,
             rreil!{
                 add short_addr:8, (base), (index);
                 zext/16 (addr), short_addr:8;
-                load/ram val:8, (addr);
+                load/ram/be/8 val:8, (addr);
             }
         });
 
@@ -284,8 +290,8 @@ pub fn zpage_index(opcode: &'static str,
             rreil!{
                 add short_addr:8, (base), (index);
                 zext/16 addr:16, short_addr:8;
-                load/ram (addr), addr:16;
-                load/ram val:8, (addr);
+                load/ram/be/8 (addr), addr:16;
+                load/ram/be/8 val:8, (addr);
             }
         });
 
@@ -307,7 +313,7 @@ pub fn absolute(opcode: &'static str,
 
         st.mnemonic(len,&opcode,"{p:ram}",vec![base.clone()], &|c| -> Result<Vec<Statement>> {
             let mut stmts = try!(rreil!{
-                load/ram val:8, (base);
+                load/ram/be/8 val:8, (base);
             });
 
             stmts.append(&mut try!(sem(c, rreil_rvalue!{ val:8 })));
@@ -342,7 +348,7 @@ pub fn absolute_offset(opcode: &'static str,
             rreil!{
                 zext/16 (addr), (index);
                 add (addr), (addr), (base);
-                load/ram val:8, (addr);
+                load/ram/be/8 val:8, (addr);
             }
         });
 

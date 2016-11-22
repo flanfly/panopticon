@@ -34,7 +34,9 @@ use panopticon::{
     Bound,
     World,
     approximate,
-    Kset,
+    BoundedAddrTrack,
+    addrtrack,
+    FunctionRef,
 };
 use panopticon::amd64;
 use panopticon::mos;
@@ -60,6 +62,7 @@ use controller::{
     FINISHED_FUNCTION,
     Controller,
     return_json,
+    Session,
 };
 use uuid::Uuid;
 
@@ -94,23 +97,27 @@ pub fn create_raw_project(_path: &Variant, _tgt: &Variant, _base: &Variant, _ent
                                     data: World::new(reg),
                                     comments: HashMap::new(),
                                 };
-                                let mut prog = Program::new("prog0");
+                                let mut prog = Program::new("prog0".into());
+                                let mut todo = vec![];
 
                                 if entry >= 0 {
                                     let uu =  Uuid::new_v4();
-                                    prog.call_graph.add_vertex(CallTarget::Todo(Rvalue::new_u64(entry as u64),Some("Entry point".to_string()),uu));
+                                    todo.push((prog.uuid.clone(),entry as u64,"".into(),Some("Entry point".to_string().into())));
                                     proj.comments.insert((nam.to_string(),entry as u64),"User supplied entry point".to_string());
                                 } else {
                                     for &(name,off,cmnt) in iv.iter() {
-                                        let uu =  Uuid::new_v4();
-                                        prog.call_graph.add_vertex(CallTarget::Todo(Rvalue::new_u64(off),Some(name.to_string()),uu));
+                                        todo.push((prog.uuid.clone(),off as u64,"".into(),Some(name.to_string().into())));
                                         proj.comments.insert((nam.to_string(),off),cmnt.to_string());
                                     }
                                 }
 
                                 proj.code.push(prog);
+                                let mut sess = Session{
+                                    project: proj,
+                                    todo: todo
+                                };
 
-                                let ret = return_json(Controller::replace(proj,None));
+                                let ret = return_json(Controller::replace(sess,None));
                                 match tgt_s.as_str() {
                                     //"mos6502" => spawn_disassembler::<Mos>(mos::Variant::mos6502()),
                                     //"atmega103" => spawn_disassembler::<Avr>(Mcu::atmega103()),
@@ -149,14 +156,25 @@ pub fn create_elf_project(_path: &Variant) -> Variant {
    // use panopticon::avr;
     Variant::String(if let &Variant::String(ref s) = _path {
         match elf::load(Path::new(s)) {
-            Ok((proj,f)) => {
+            Ok((proj,f,todo)) => {
+                let sess = Session{ project: proj, todo: todo };
                 match f {
-                    elf::Machine::Ia32 => spawn_disassembler::<amd64::Amd64>(amd64::Mode::Protected),
-                    elf::Machine::Amd64 => spawn_disassembler::<amd64::Amd64>(amd64::Mode::Long),
-                    elf::Machine::Avr => spawn_disassembler::<avr::Avr>(avr::Mcu::atmega88()),
+                    elf::Machine::Ia32 => {
+                        let ret = return_json(Controller::replace(sess,None));
+                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Protected);
+                        ret
+                    }
+                    elf::Machine::Amd64 => {
+                        let ret = return_json(Controller::replace(sess,None));
+                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Long);
+                        ret
+                    }
+                    elf::Machine::Avr => {
+                        let ret = return_json(Controller::replace(sess,None));
+                        queue_all_todos::<avr::Avr>(avr::Mcu::atmega88());
+                        ret
+                    }
                 }
-
-                return_json(Controller::replace(proj,None))
             },
             Err(err) => return_json::<()>(Err(format!("Failed to read ELF file: {:?}", err).into())),
         }
@@ -184,7 +202,8 @@ pub fn open_project(_path: &Variant) -> Variant {
     Variant::String(if let &Variant::String(ref s) = _path {
         match Project::open(&Path::new(s)) {
             Ok(proj) => {
-                let ret = return_json(Controller::replace(proj,Some(&Path::new(s))));
+                let sess = Session{ project: proj, todo: vec![] };
+                let ret = return_json(Controller::replace(sess,Some(&Path::new(s))));
                 spawn_discoverer();
                 ret
             },
@@ -218,30 +237,48 @@ pub fn set_request(_req: &Variant) -> Variant {
 }
 
 /// Starts disassembly
-pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configuration) where A::Configuration: Debug + Sync, A::Token: Sync + Send {
-    use std::sync::Mutex;
+pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration) where A::Configuration: Debug + Sync, A::Token: Sync + Send {
+    Controller::modify(|mut sess| -> Result<()> {
+        for (uuid,entry,region_name,maybe_name) in sess.todo.drain(..) {
+            let func_ref = if let Some(mut prog) = sess.project.find_program_by_uuid_mut(&uuid) {
+                use std::sync::Arc;
+                use parking_lot::RwLock;
 
-    thread::spawn(move || -> Result<()> {
-        let maybe_prog_uuid = try!(Controller::read(|proj| {
-            proj.code.first().map(|x| x.uuid)
-        }));
+                let mut func = Function::new(maybe_name.map(|x| (*x.to_owned()).to_string()).unwrap_or("".to_string()),(*region_name.to_owned()).to_string());
+                let uuid = func.uuid.clone();
+                let ent = func.cflow_graph.add_vertex(ControlFlowTarget::Unresolved(Rvalue::Constant{ value: entry, size: 64 }));
+                let vx = prog.call_graph.add_vertex(CallTarget::Function(uuid.clone()));
 
-        if let Some(prog_uuid) = maybe_prog_uuid {
-            let todo_funcs = try!(Controller::read(|proj| {
-                let prog: &Program = proj.find_program_by_uuid(&prog_uuid).unwrap();
+                func.entry_point = Some(ent);
 
-                prog.call_graph.vertices().filter_map(|x| {
-                    if let Some(&CallTarget::Todo(_,_,uuid)) = prog.call_graph.vertex_label(x) {
-                        Some(uuid)
-                    } else {
-                        None
-                    }
-                }).collect::<Vec<_>>()
-            }));
+                let func_ref = (Arc::new(RwLock::new(func)),vx);
+                prog.functions.insert(uuid,func_ref.clone());
+                func_ref
+            } else {
+                return Err("can't find program".into());
+            };
+
+            let world = &sess.project.data;
+            if let Some(ref prog) = sess.project.find_program_by_uuid(&uuid) {
+                if let Some(ref region) = world.dependencies.vertex_label(world.root) {
+                    use pipeline;
+                    println!("{:?}",pipeline::run_disassembler(vec![func_ref],&prog,region));
+                }
+            }
+        }
+
+        Ok(())
+    });
+}
+/*
+            //debug!("symbol table: {:?}",symtbl);
 
             for uu in todo_funcs {
                 try!(Controller::emit(DISCOVERED_FUNCTION,&uu.to_string()));
             }
+
+
+            let mut start: Option<u64> = None;
 
             loop {
                 let maybe_tgt = try!(Controller::read(|proj| {
@@ -258,9 +295,12 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
 
                 match maybe_tgt {
                     Some((Rvalue::Constant{ value: tgt,.. },maybe_name,uuid)) => {
+
+                        /*
                         try!(Controller::emit(STARTED_FUNCTION,&uuid.to_string()));
 
                         let cfg = _cfg.clone();
+                        let symtbl = symtbl.clone();
                         let th = thread::spawn(move || -> Result<Vec<Uuid>> {
                             let entry = tgt;
                             let mut func = try!(Controller::read(|proj| {
@@ -303,23 +343,34 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                                 fixpoint = true;
                                 ssa_convertion(&mut func);
 
+                                use std::borrow::Cow;
+                                let mut env = HashMap::<(Cow<'static,str>,usize),BoundedAddrTrack>::new();
+                                env.insert(("ESP".into(),0),BoundedAddrTrack::Offset{ region: Some(("stack".into(),0)), offset: 0, offset_size: 32 });
+                                env.insert(("RSP".into(),0),BoundedAddrTrack::Offset{ region: Some(("stack".into(),0)), offset: 0, offset_size: 64 });
+
+                                println!("{}",func.to_dot());
+
                                 let vals = try!(try!(Controller::read(|proj| {
                                     let root = proj.data.dependencies.vertex_label(proj.data.root).unwrap();
-                                    approximate::<Kset>(&func,Some(root))
+                                    approximate::<BoundedAddrTrack>(&func,Some(root),&symtbl,&env)
                                 })));
                                 let vxs = { func.cflow_graph.vertices().collect::<Vec<_>>() };
                                 let mut resolved_jumps = HashSet::<u64>::new();
 
-                                debug!("vals: {:?}",vals);
+                                debug!("vals: {:#?}",vals);
 
                                 for &vx in vxs.iter() {
-                                    if let Some(&mut ControlFlowTarget::Unresolved(ref mut var@Rvalue::Variable{..})) = func.cflow_graph.vertex_label_mut(vx) {
-                                        if let Some(&Kset::Set(ref v)) = vals.get(&Lvalue::from_rvalue(var.clone()).unwrap()) {
-                                            if let Some(&(val,sz)) = v.first() {
-                                                *var = Rvalue::Constant{ value: val, size: sz };
+                                    let maybe_lb = func.cflow_graph.vertex_label_mut(vx);
+                                    if let Some(&mut ControlFlowTarget::Unresolved(ref mut var@Rvalue::Variable{..})) = maybe_lb {
+                                        let aval = vals.get(&Lvalue::from_rvalue(var.clone()).unwrap());
+                                        if let Some(&BoundedAddrTrack::Offset{ ref region, ref offset, ref offset_size }) = aval {
+                                            if region.is_none() {
+                                                *var = Rvalue::Constant{ value: *offset, size: *offset_size };
                                                 fixpoint = true;
-                                                debug!("resolved {:?} to {:?}",var,val);
-                                                resolved_jumps.insert(val);
+                                                debug!("resolved {:?} to {:?}",var,*offset);
+                                                resolved_jumps.insert(*offset);
+                                            } else if *offset == 0 {
+                                                debug!("resolved {:?} to symbolic value {:?}",var,region);
                                             }
                                         }
                                     }
@@ -342,6 +393,10 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                                 debug!("secondary pass done");
                             }
 
+                            if start.is_none() {
+                                start = Some(func.uuid)
+                            }
+
                             let new_functions = try!(Controller::modify(|proj| {
                                 let mut prog: &mut Program = proj.find_program_by_uuid_mut(&prog_uuid).unwrap();
 
@@ -349,7 +404,6 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                             }));
 
                             debug!("function finished");
-
                             Ok(new_functions)
                         });
 
@@ -370,6 +424,7 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                                 try!(Controller::emit(FINISHED_FUNCTION,&uuid.to_string()))
                             },
                         }
+                        */
                     }
                     Some((rv,maybe_name,uuid)) => {
                         debug!("skip call to {:?} ({:?},{:?})",rv,maybe_name,uuid);
@@ -379,19 +434,102 @@ pub fn spawn_disassembler<A: 'static + Architecture + Debug>(_cfg: A::Configurat
                     }
                 }
             }
+
+            /*
+            use panopticon::{
+                Operation,
+                Statement
+            };
+
+            try!(Controller::read(|proj| {
+                println!("1: {:?}",prog_uuid);
+                let prog: &Program = proj.find_program_by_uuid(&prog_uuid).unwrap();
+                println!("2: {:?}",start);
+                let mut todo = HashSet::new();
+
+                todo.insert(prog.call_graph.vertices().find(|&x| {
+                    prog.call_graph.vertex_label(x).map(|x| x.uuid()) == start
+                }).unwrap());
+                println!("3");
+
+                while let Some(&vx) = todo.iter().next() {
+                    todo.remove(&vx);
+
+                    match prog.call_graph.vertex_label(vx) {
+                        Some(&CallTarget::Concrete(ref f)) => {
+                            println!("{}",f.name);
+                            let mut reads = vec![];
+                            let mut writes = vec![];
+                            let regs:&[&str] = A::registers(&_cfg).unwrap();
+
+                            for vx in f.cflow_graph.vertices() {
+                                if let Some(&ControlFlowTarget::Resolved(ref bb)) = f.cflow_graph.vertex_label(vx) {
+                                    bb.execute(|i| match i {
+                                        &Statement::Simple{ op: Operation::Initialize(ref nam,ref sz), .. } => {
+                                            if regs.iter().any(|x| x == &nam) {
+                                                reads.push(nam);
+                                            }
+                                        }
+                                        &Statement::Simple{ assignee: Lvalue::Variable{ ref name,.. },.. } => {
+                                            if regs.iter().any(|x| x == name) {
+                                                writes.push(name);
+                                            }
+                                        }
+                                        &Statement::Call{ reads: ref rs, writes: ref ws,.. } => {
+                                            for r in rs {
+                                                if let &Rvalue::Variable{ ref name,.. } = r {
+                                                    if regs.iter().any(|x| x == name) {
+                                                        reads.push(name);
+                                                    }
+                                                }
+                                            }
+                                            for w in ws {
+                                                if let &Lvalue::Variable{ ref name,.. } = w {
+                                                    if regs.iter().any(|x| x == name) {
+                                                        writes.push(name);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    });
+                                }
+                            }
+
+                            reads.sort();
+                            //reads.uniq();
+
+                            writes.sort();
+                            //writes.uniq();
+
+                            println!("reads: {:?}",reads);
+                            println!("writes: {:?}",writes);
+                        },
+                        Some(&CallTarget::Symbolic(ref n,_,_,_)) => {
+                            println!("Sym {}",n);
+                        },
+                        Some(&CallTarget::Todo(ref v,_,_)) => {
+                            println!("Todo {:?}",v);
+                        }
+                        None => {
+                            unreachable!();
+                        }
+                    }
+                }
+            }));
+            */
         } else {
             unreachable!()
         }
 
         Ok(())
     });
-}
+}*/
 
 pub fn spawn_discoverer() {
     thread::spawn(move || -> Result<()> {
-        let uuids = try!(Controller::read(|proj| {
-            proj.code.iter().flat_map(|p| p.call_graph.vertices().filter_map(move |vx| {
-                p.call_graph.vertex_label(vx).map(|x| x.uuid()) })).collect::<Vec<_>>()
+        let uuids = try!(Controller::read(|sess| {
+            sess.project.code.iter().flat_map(|p| p.functions.keys().cloned().collect::<Vec<_>>()).collect::<Vec<_>>()
         }));
 
         for uu in uuids {

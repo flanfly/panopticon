@@ -1,6 +1,6 @@
 /*
  * Panopticon - A libre disassembler
- * Copyright (C) 2014,2015,2016 Kai Michaelis
+ * Copyright (C) 2014,2015,2016 Panopticon Authors
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,12 +27,16 @@
 //! Adding a positive and a negative sign yields an abstract value representing both signs (called
 //! join).
 
+pub mod addrtrack;
+pub mod kset;
+
 use std::hash::Hash;
 use std::fmt::Debug;
-use std::collections::{HashSet,HashMap};
-use std::iter::FromIterator;
 use std::borrow::Cow;
+use std::iter::FromIterator;
 use std::cmp::max;
+use std::collections::{HashSet,HashMap};
+use std::ops::Range;
 
 use graph_algos::{
     GraphTrait,
@@ -92,7 +96,7 @@ pub trait Avalue: Clone + PartialEq + Eq + Hash + Debug + Encodable + Decodable 
     /// the constraint the best.
     fn abstract_constraint(&Constraint) -> Self;
     /// Execute the abstract version of the operation, yielding the result.
-    fn execute(&ProgramPoint,&Operation<Self>,Option<&Region>) -> Self;
+    fn execute(&ProgramPoint,&Operation<Self>,Option<&Region>,&HashMap<Range<u64>,Cow<'static,str>>) -> Self;
     /// Narrows `self` with the argument.
     fn narrow(&self,&Self) -> Self;
     /// Widens `self` with the argument.
@@ -110,7 +114,9 @@ pub trait Avalue: Clone + PartialEq + Eq + Hash + Debug + Encodable + Decodable 
 /// Does an abstract interpretation of `func` using the abstract domain `A`. The function uses a
 /// fixed point iteration and the widening strategy outlined in
 /// Bourdoncle: "Efficient chaotic iteration strategies with widenings".
-pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<HashMap<Lvalue,A>> {
+pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
+                              sym: &HashMap<Range<u64>,Cow<'static,str>>,
+                              env: &HashMap<(Cow<'static,str>,usize),A>) -> Result<HashMap<Lvalue,A>> {
     if func.entry_point.is_none() {
         return Err("function has no entry point".into());
     }
@@ -119,13 +125,14 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<Ha
     let edge_ops = flag_operations(func);
     fn stabilize<A: Avalue>(h: &Vec<Box<HierarchicalOrdering<ControlFlowRef>>>, graph: &ControlFlowGraph,
                             constr: &HashMap<Lvalue,A>, sizes: &HashMap<Cow<'static,str>,usize>,
-                            ret: &mut HashMap<(Cow<'static,str>,usize),A>,reg: Option<&Region>) -> Result<()> {
+                            ret: &mut HashMap<(Cow<'static,str>,usize),A>,reg: Option<&Region>,
+                            sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<()> {
         let mut stable = true;
         let mut iter_cnt = 0;
         let head = if let Some(h) = h.first() {
             match &**h {
                 &HierarchicalOrdering::Element(ref vx) => vx.clone(),
-                &HierarchicalOrdering::Component(ref vec) => return stabilize(vec,graph,constr,sizes,ret,reg),
+                &HierarchicalOrdering::Component(ref vec) => return stabilize(vec,graph,constr,sizes,ret,reg,sym),
             }
         } else {
             return Ok(())
@@ -135,9 +142,9 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<Ha
             for x in h.iter() {
                 match &**x {
                     &HierarchicalOrdering::Element(ref vx) =>
-                        stable &= !try!(execute(*vx,iter_cnt >= 2 && *vx == head,graph,constr,sizes,ret,reg)),
+                        stable &= !try!(execute(*vx,iter_cnt >= 2 && *vx == head,graph,constr,sizes,ret,reg,sym)),
                     &HierarchicalOrdering::Component(ref vec) => {
-                        try!(stabilize(&*vec,graph,constr,sizes,ret,reg));
+                        try!(stabilize(&*vec,graph,constr,sizes,ret,reg,sym));
                         stable = true;
                     },
                 }
@@ -163,37 +170,52 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<Ha
     }
     fn execute<A: Avalue>(t: ControlFlowRef, do_widen: bool, graph: &ControlFlowGraph,
                           _: &HashMap<Lvalue,A>, sizes: &HashMap<Cow<'static,str>,usize>,
-                          ret: &mut HashMap<(Cow<'static,str>,usize),A>, reg: Option<&Region>) -> Result<bool> {
+                          ret: &mut HashMap<(Cow<'static,str>,usize),A>, reg: Option<&Region>,
+                          sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<bool> {
         if let Some(&ControlFlowTarget::Resolved(ref bb)) = graph.vertex_label(t) {
             let mut change = false;
             let mut pos = 0usize;
             bb.execute(|i| {
-                if let Statement{ ref op, assignee: Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } } = *i {
-                    let pp = ProgramPoint{ address: bb.area.start, position: pos };
-                    let new = A::execute(&pp,&lift(op,&|x| res::<A>(x,sizes,&ret)),reg);
-                    let assignee = (name.clone(),*subscript);
-                    let cur = ret.get(&assignee).cloned();
+                let mut exec_single_rreil_instr = |op: &Operation<Rvalue>, assignee: &Lvalue| {
+                    if let Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = *assignee {
+                        let pp = ProgramPoint{ address: bb.area.start, position: pos };
+                        let new = A::execute(&pp,&lift(op,&|x| res::<A>(x,sizes,&ret)),reg,sym);
+                        let assignee = (name.clone(),*subscript);
+                        let cur = ret.get(&assignee).cloned();
 
-                    if cur.is_none() {
-                        change = true;
-                        ret.insert(assignee,new);
-                    } else {
-                        if do_widen {
-                            let c = cur.unwrap();
-                            let w = c.widen(&new);
-
-                            if w != c {
-                                change = true;
-                                ret.insert(assignee,w);
-                            }
-                        } else if new.more_exact(&cur.clone().unwrap()) {
+                        if cur.is_none() {
                             change = true;
                             ret.insert(assignee,new);
+                        } else {
+                            if do_widen {
+                                let c = cur.unwrap();
+                                let w = c.widen(&new);
+
+                                if w != c {
+                                    change = true;
+                                    ret.insert(assignee,w);
+                                }
+                            } else if new.more_exact(&cur.clone().unwrap()) {
+                                change = true;
+                                ret.insert(assignee,new);
+                            }
                         }
                     }
-                }
 
-                pos += 1;
+                    pos += 1;
+                };
+
+                match i {
+                    &Statement::Simple{ ref op, ref assignee } =>
+                        exec_single_rreil_instr(op,assignee),
+                    &Statement::Call{ ref writes,.. } =>
+                        for w in writes.iter() {
+                            if let &Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = w {
+                                // TODO
+                                exec_single_rreil_instr(&Operation::Move(Rvalue::Undefined),w);
+                            }
+                        }
+                }
             });
 
             Ok(change)
@@ -215,17 +237,29 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<Ha
             A::abstract_value(v)
         }
     };
-    let mut ret = HashMap::<(Cow<'static,str>,usize),A>::new();
+    let mut ret = env.clone();//HashMap::<(Cow<'static,str>,usize),A>::new();
     let mut sizes = HashMap::<Cow<'static,str>,usize>::new();
     let mut constr = HashMap::<Lvalue,A>::new();
 
     for vx in func.cflow_graph.vertices() {
         if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
             bb.execute(|i| {
-                if let Lvalue::Variable{ ref name, ref size,.. } = i.assignee {
-                    let t = *size;
-                    let s = *sizes.get(name).unwrap_or(&t);
-                    sizes.insert(name.clone(),max(s,t));
+                match i {
+                    &Statement::Simple{ assignee: Lvalue::Variable{ ref name, ref size,.. },.. } => {
+                        let t = *size;
+                        let s = *sizes.get(name).unwrap_or(&t);
+                        sizes.insert(name.clone(),max(s,t));
+                    }
+                    &Statement::Call{ ref writes,.. } => {
+                        for lv in writes.iter() {
+                            if let &Lvalue::Variable{ ref name, ref size,.. } = lv {
+                                let t = *size;
+                                let s = *sizes.get(name).unwrap_or(&t);
+                                sizes.insert(name.clone(),max(s,t));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             });
         }
@@ -273,10 +307,10 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>) -> Result<Ha
 
     match wto {
         HierarchicalOrdering::Component(ref v) => {
-            try!(stabilize(v,&func.cflow_graph,&constr,&sizes,&mut ret,reg));
+            try!(stabilize(v,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym));
         },
         HierarchicalOrdering::Element(ref v) => {
-            try!(execute(*v,false,&func.cflow_graph,&constr,&sizes,&mut ret,reg));
+            try!(execute(*v,false,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym));
         },
     }
 
@@ -304,8 +338,18 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
     for vx in cfg.vertices() {
         if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg.vertex_label(vx) {
             bb.execute(|i| {
-                if let Lvalue::Variable{ ref name,.. } = i.assignee {
-                    names.insert(name.clone());
+                match i {
+                    &Statement::Simple{ assignee: Lvalue::Variable{ ref name, ref size,.. },.. } => {
+                        names.insert(name.clone());
+                    }
+                    &Statement::Call{ ref writes,.. } => {
+                        for lv in writes.iter() {
+                            if let &Lvalue::Variable{ ref name, ref size,.. } = lv {
+                                names.insert(name.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             });
         }
@@ -320,10 +364,24 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
                     loop {
                         let mut hit = false;
                         bb.execute_backwards(|i| {
-                            if let Lvalue::Variable{ ref name, ref size,.. } = i.assignee {
-                                if name == lv {
-                                    hit = true;
-                                    ret.insert((name.clone(),*size),vals.get(&i.assignee).unwrap_or(&A::initial()).clone());
+                            match i {
+                                &Statement::Simple{ ref assignee,.. } => {
+                                    if let &Lvalue::Variable{ ref name, ref size,.. } = assignee {
+                                        if name == lv {
+                                            hit = true;
+                                            ret.insert((name.clone(),*size),vals.get(assignee).unwrap_or(&A::initial()).clone());
+                                        }
+                                    }
+                                }
+                                &Statement::Call{ ref writes,.. } => {
+                                    for w in writes.iter() {
+                                        if let &Lvalue::Variable{ ref name, ref size,.. } = w {
+                                            if name == lv {
+                                                hit = true;
+                                                ret.insert((name.clone(),*size),vals.get(w).unwrap_or(&A::initial()).clone());
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -352,258 +410,6 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
     ret
 }
 
-/// Largest Kset cardinality before Join.
-const KSET_MAXIMAL_CARDINALITY: usize = 10;
-
-/// Kindler et.al style Kset domain. Domain elements are sets of concrete values. Sets have a
-/// maximum cardinality. Every set larger than that is equal the lattice join. The partial order is
-/// set inclusion.
-#[derive(Debug,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
-pub enum Kset {
-    /// Lattice join. Sets larger than `KSET_MAXIMAL_CARDINALITY`.
-    Join,
-    /// Set of concrete values and their size in bits. The set is never empty and never larger than
-    /// `KSET_MAXIMAL_CARDINALITY`.
-    Set(Vec<(u64,usize)>),
-    /// Lattice meet, equal to the empty set.
-    Meet,
-}
-
-impl PartialEq for Kset {
-    fn eq(&self,other: &Kset) -> bool {
-        match (self,other) {
-            (&Kset::Meet,&Kset::Meet) => true,
-            (&Kset::Set(ref a),&Kset::Set(ref b)) =>
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(a,b)| a == b),
-                (&Kset::Join,&Kset::Join) => true,
-                _ => false
-        }
-    }
-}
-
-impl Avalue for Kset {
-    fn abstract_value(v: &Rvalue) -> Self {
-        if let &Rvalue::Constant{ ref value, ref size } = v {
-            Kset::Set(vec![(if *size < 64 { *value % (1u64 << *size) } else { *value },*size)])
-        } else {
-            Kset::Join
-        }
-    }
-
-    fn abstract_constraint(constr: &Constraint) -> Self {
-        if let &Constraint::Equal(Rvalue::Constant{ ref value, ref size }) = constr {
-            Kset::Set(vec![(if *size < 64 { *value % (1u64 << *size) } else { *value },*size)])
-        } else {
-            Kset::Join
-        }
-    }
-
-    fn execute(_: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>) -> Self {
-        fn permute(_a: &Kset, _b: &Kset, f: &Fn(Rvalue,Rvalue) -> Rvalue) -> Kset {
-            match (_a,_b) {
-                (&Kset::Join,_) => Kset::Join,
-                (_,&Kset::Join) => Kset::Join,
-                (&Kset::Set(ref a),&Kset::Set(ref b)) => {
-                    let mut ret = HashSet::<(u64,usize)>::new();
-                    for &(_x,_xs) in a.iter() {
-                        let x = Rvalue::Constant{ value: _x, size: _xs };
-                        for &(_y,_ys) in b.iter() {
-                            let y = Rvalue::Constant{ value: _y, size: _ys };
-                            if let Rvalue::Constant{ value, size } = f(x.clone(),y) {
-                                ret.insert((value,size));
-                                if ret.len() > KSET_MAXIMAL_CARDINALITY {
-                                    return Kset::Join;
-                                }
-                            }
-                        }
-                    }
-
-                    if ret.is_empty() {
-                        Kset::Meet
-                    } else {
-                        let mut v = ret.drain().collect::<Vec<(u64,usize)>>();
-                        v.sort();
-                        Kset::Set(v)
-                    }
-                },
-                _ => Kset::Meet,
-            }
-        };
-        fn map(_a: &Kset, f: &Fn(Rvalue) -> Rvalue) -> Kset {
-            if let &Kset::Set(ref a) = _a {
-                let mut s = HashSet::<(u64,usize)>::from_iter(
-                    a.iter().filter_map(|&(a,_as)| {
-                        if let Rvalue::Constant{ value, size } = f(Rvalue::Constant{ value: a, size: _as }) {
-                            Some((value,size))
-                        } else {
-                            None
-                        }
-                    }));
-
-                if s.len() > KSET_MAXIMAL_CARDINALITY {
-                    Kset::Join
-                } else if s.is_empty() {
-                    Kset::Meet
-                } else {
-                    let mut v = s.drain().collect::<Vec<(_,_)>>();
-                    v.sort();
-                    Kset::Set(v)
-                }
-            } else {
-                _a.clone()
-            }
-        };
-
-        println!("exec {:?}",op);
-
-        match *op {
-            Operation::And(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::And(a,b))),
-            Operation::InclusiveOr(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::InclusiveOr(a,b))),
-            Operation::ExclusiveOr(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::ExclusiveOr(a,b))),
-            Operation::Add(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Add(a,b))),
-            Operation::Subtract(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Subtract(a,b))),
-            Operation::Multiply(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
-            Operation::DivideSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
-            Operation::DivideUnsigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
-            Operation::Modulo(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Modulo(a,b))),
-            Operation::ShiftRightSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::ShiftRightSigned(a,b))),
-            Operation::ShiftRightUnsigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::ShiftRightUnsigned(a,b))),
-            Operation::ShiftLeft(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::ShiftLeft(a,b))),
-
-            Operation::LessOrEqualSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::LessOrEqualSigned(a,b))),
-            Operation::LessOrEqualUnsigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::LessOrEqualUnsigned(a,b))),
-            Operation::LessSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::LessSigned(a,b))),
-            Operation::LessUnsigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::LessUnsigned(a,b))),
-            Operation::Equal(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Equal(a,b))),
-
-            Operation::Move(ref a) =>
-                map(a,&|a| execute(Operation::Move(a))),
-            Operation::Call(ref a) =>
-                map(a,&|a| execute(Operation::Call(a))),
-            Operation::ZeroExtend(ref sz,ref a) =>
-                map(a,&|a| execute(Operation::ZeroExtend(*sz,a))),
-            Operation::SignExtend(ref sz,ref a) =>
-                map(a,&|a| execute(Operation::SignExtend(*sz,a))),
-            Operation::Select(ref off,ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::Select(*off,a,b))),
-
-            Operation::Load(ref r,ref a) =>
-                map(a,&|a| {
-                    println!("load {:?}, {:?}",a,reg);
-                    if let Some(ref reg) = reg {
-                        if reg.name() == r {
-                            if let Rvalue::Constant{ value, size } = a {
-                                if let Some(Some(val)) = reg.iter().seek(value).next() {
-                                    return Rvalue::Constant{ value: val as u64, size: 8 };
-                                }
-                            }
-                        }
-                    }
-                    Rvalue::Undefined
-                }),
-            Operation::Store(ref r,ref a) =>
-                map(a,&|a| execute(Operation::Store(r.clone(),a))),
-
-            Operation::Phi(ref ops) => {
-                match ops.len() {
-                    0 => unreachable!("Phi function w/o arguments"),
-                    1 => ops[0].clone(),
-                    _ => ops.iter().fold(Kset::Meet,|acc,x| acc.combine(&x))
-                }
-            }
-        }
-    }
-
-    fn narrow(&self, a: &Self) -> Self {
-        match a {
-            &Kset::Meet => Kset::Meet,
-            &Kset::Join => self.clone(),
-            &Kset::Set(ref v) => {
-                match self {
-                    &Kset::Meet => Kset::Meet,
-                    &Kset::Join => Kset::Set(v.clone()),
-                    &Kset::Set(ref w) => {
-                        let set = HashSet::<&(u64,usize)>::from_iter(v.iter());
-                        Kset::Set(w.iter().filter(|x| set.contains(x)).cloned().collect::<Vec<_>>())
-                    },
-                }
-            },
-        }
-    }
-
-    fn combine(&self,a: &Self) -> Self {
-        match (self,a) {
-            (&Kset::Join,_) => Kset::Join,
-            (_,&Kset::Join) => Kset::Join,
-            (a,&Kset::Meet) => a.clone(),
-            (&Kset::Meet,b) => b.clone(),
-            (&Kset::Set(ref a),&Kset::Set(ref b)) => {
-                let mut ret = HashSet::<&(u64,usize)>::from_iter(a.iter().chain(b.iter()))
-                    .iter().cloned().cloned().collect::<Vec<(u64,usize)>>();
-                ret.sort();
-                if ret.is_empty() {
-                    Kset::Meet
-                } else if ret.len() > KSET_MAXIMAL_CARDINALITY {
-                    Kset::Join
-                } else {
-                    Kset::Set(ret)
-                }
-            },
-        }
-    }
-
-    fn widen(&self,s: &Self) -> Self {
-        s.clone()
-    }
-
-    fn initial() -> Self {
-        Kset::Meet
-    }
-
-    fn more_exact(&self, a: &Self) -> bool {
-        if self == a {
-            false
-        } else {
-            match (self,a) {
-                (&Kset::Join,_) => true,
-                (_,&Kset::Meet) => true,
-                (&Kset::Set(ref a),&Kset::Set(ref b)) =>
-                    HashSet::<&(u64,usize)>::from_iter(a.iter())
-                    .is_superset(&HashSet::from_iter(b.iter())),
-                    _ => false,
-            }
-        }
-    }
-
-    fn extract(&self,size: usize,offset: usize) -> Self {
-        match self {
-            &Kset::Join => Kset::Join,
-            &Kset::Meet => Kset::Meet,
-            &Kset::Set(ref v) =>
-                Kset::Set(v.iter().map(|&(v,_)| {
-                    ((v >> offset) % (1 << (size - 1)),size)
-                }).collect::<Vec<_>>()),
-        }
-    }
-}
-
 /// Mihaila et.al. Widening Point inferring cofibered domain. This domain is parameterized with a
 /// child domain.
 #[derive(Debug,PartialEq,Eq,Clone,Hash,RustcDecodable,RustcEncodable)]
@@ -627,7 +433,7 @@ impl<A: Avalue> Avalue for Widening<A> {
         }
     }
 
-    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>) -> Self {
+    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>,sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
         match op {
             &Operation::Phi(ref ops) => {
                 let widen = ops.iter().map(|x| x.point.clone().unwrap_or(pp.clone())).max() > Some(pp.clone());
@@ -648,7 +454,7 @@ impl<A: Avalue> Avalue for Widening<A> {
                 }
             },
             _ => Widening{
-                value: A::execute(pp,&lift(op,&|x| x.value.clone()),reg),
+                value: A::execute(pp,&lift(op,&|x| x.value.clone()),reg,sym),
                 point: Some(pp.clone()),
             }
         }
@@ -701,13 +507,16 @@ mod tests {
         Lvalue,Rvalue,
         Bound,Mnemonic,
         ssa_convertion,
-        BasicBlock,
+        BasicBlock,Region,
+        Kset,
     };
 
     use graph_algos::{
         MutableGraphTrait,
     };
     use std::borrow::Cow;
+    use std::collections::HashMap;
+    use std::ops::Range;
 
     #[derive(Debug,Clone,PartialEq,Eq,Hash,RustcDecodable,RustcEncodable)]
     enum Sign {
@@ -741,7 +550,7 @@ mod tests {
             }
         }
 
-        fn execute(_: &ProgramPoint, op: &Operation<Self>, _: Option<&Region>) -> Self {
+        fn execute(_: &ProgramPoint, op: &Operation<Self>, _: Option<&Region>,_: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
             match op {
                 &Operation::Add(Sign::Positive,Sign::Positive) => Sign::Positive,
                 &Operation::Add(Sign::Positive,Sign::Zero) => Sign::Positive,
@@ -936,7 +745,7 @@ mod tests {
 
         ssa_convertion(&mut func);
 
-        let vals = approximate::<Sign>(&func,None).ok().unwrap();
+        let vals = approximate::<Sign>(&func,None,&HashMap::new(),&HashMap::new()).ok().unwrap();
         let res = results::<Sign>(&func,&vals);
 
         assert_eq!(res[&(Cow::Borrowed("x"),32)],Sign::Join);
@@ -996,7 +805,7 @@ mod tests {
 
         ssa_convertion(&mut func);
 
-        let vals = approximate::<Sign>(&func,None).ok().unwrap();
+        let vals = approximate::<Sign>(&func,None,&HashMap::new(),&HashMap::new()).ok().unwrap();
         let res = results::<Sign>(&func,&vals);
 
         println!("vals: {:?}",vals);
@@ -1086,7 +895,7 @@ mod tests {
 
         ssa_convertion(&mut func);
 
-        let vals = approximate::<Kset>(&func,None).ok().unwrap();
+        let vals = approximate::<Kset>(&func,None,&HashMap::new(),&HashMap::new()).ok().unwrap();
         let res = results::<Kset>(&func,&vals);
 
         assert_eq!(res[&(Cow::Borrowed("a"),32)],Kset::Join);
@@ -1130,7 +939,7 @@ mod tests {
 
         ssa_convertion(&mut func);
 
-        let vals = approximate::<Kset>(&func,None).ok().unwrap();
+        let vals = approximate::<Kset>(&func,None,&HashMap::new(),&HashMap::new()).ok().unwrap();
 
         for i in vals {
             println!("{:?}",i);
