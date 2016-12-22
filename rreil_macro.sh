@@ -123,10 +123,8 @@ do
    echo "    // call $A"
    echo "    ( $A_MATCH ; \$(\$cdr:tt)*) => {"
    echo "        {"
-   echo "            let mut stmt = vec![\$crate::Statement::Call{"
+   echo "            let mut stmt = vec![\$crate::Statement::UnresolvedCall{"
    echo "                target: rreil_rvalue!($A_ARG),"
-	 echo "                reads: vec![],"
-   echo "                writes: vec![],"
    echo "            }];"
    print_tail
    echo "        }"

@@ -22,6 +22,8 @@ use std::io::{Seek,SeekFrom,Read,Cursor};
 use std::fs::File;
 use std::path::Path;
 use std::borrow::Cow;
+use std::ops::Range;
+use std::collections::HashMap;
 
 use graph_algos::MutableGraphTrait;
 use uuid::Uuid;
@@ -150,7 +152,7 @@ macro_rules! load_impl {
 
 /// Load an ELF file from disk and creates a `Project` from it. Returns the `Project` instance and
 /// the CPU its intended for.
-pub fn load(p: &Path) -> Result<(Project,Machine,Vec<(Uuid,u64,Cow<'static,str>,Option<Cow<'static,str>>)>)> {
+pub fn load(p: &Path) -> Result<(Project,HashMap<Range<u64>,Cow<'static,str>>,Machine,Vec<(Uuid,u64,Cow<'static,str>,Option<Cow<'static,str>>)>)> {
     let mut fd = try!(File::open(p));
     // it seems more efficient to load all bytes into in-memory buffer and parse those...
     // for larger binaries we should perhaps let the elf parser read from the fd though
@@ -204,6 +206,7 @@ pub fn load(p: &Path) -> Result<(Project,Machine,Vec<(Uuid,u64,Cow<'static,str>,
     let mut prog = Program::new("prog0".into());
     let mut proj = Project::new(name.clone(),reg);
     let mut todo = vec![];
+    let mut symtbl = HashMap::<Range<u64>,Cow<'static,str>>::new();
 
     let dynstrtab = binary.dynstrtab;
     let dynsyms = binary.dynsyms.into_iter().collect::<Vec<_>>();
@@ -213,7 +216,7 @@ pub fn load(p: &Path) -> Result<(Project,Machine,Vec<(Uuid,u64,Cow<'static,str>,
         debug!("{} @ 0x{:x}: {:?}", name, addr, sym);
         if sym.is_function() {
             if sym.is_import() {
-                //prog.call_graph.add_vertex(CallTarget::Symbolic(name,"RAM".to_string(),(addr,addr+8),Uuid::new_v4()));
+                symtbl.insert((addr..addr+8),name.into());
             } else {
                 todo.push((prog.uuid.clone(),addr,"RAM".into(),Some(name.into())));
             }
@@ -225,13 +228,12 @@ pub fn load(p: &Path) -> Result<(Project,Machine,Vec<(Uuid,u64,Cow<'static,str>,
         let name = dynstrtab[sym.st_name() as usize].to_string();
         let addr = rel.r_offset();
         debug!("\tval: 0x{:x} = {} + {}",addr,name,rel.r_addend());
-        prog.symbolic.insert(addr,addr+8);
-        //add_vertex(CallTarget::Symbolic(name,"RAM".to_string(),(addr,addr+8),Uuid::new_v4()));
+        symtbl.insert((addr..addr+8),name.into());
     }
 
     proj.comments.insert(("base".to_string(),entry),"main".to_string());
-                todo.push((prog.uuid.clone(),entry,"RAM".into(),Some("main".into())));
+    todo.push((prog.uuid.clone(),entry,"RAM".into(),Some("main".into())));
     proj.code.push(prog);
 
-    Ok((proj,machine,todo))
+    Ok((proj,symtbl,machine,todo))
 }

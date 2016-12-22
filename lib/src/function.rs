@@ -62,15 +62,16 @@ use {
     Statement,
     Operation,
     Result,
+    CallTarget,
 };
 
 /// Node of the function graph.
 #[derive(RustcDecodable,RustcEncodable,Debug,Clone)]
 pub enum ControlFlowTarget {
     /// A basic block
-    Resolved(BasicBlock),
+    BasicBlock(BasicBlock),
     /// An unresolved indirect jump
-    Unresolved(Rvalue),
+    Value(Rvalue),
     /// An error occured while disassembling
     Failed(u64,Cow<'static,str>),
 }
@@ -83,7 +84,7 @@ pub type ControlFlowRef = AdjacencyListVertexDescriptor;
 pub type ControlFlowEdge = AdjacencyListEdgeDescriptor;
 
 /// A set of basic blocks connected by conditional jumps
-#[derive(RustcDecodable,RustcEncodable)]
+#[derive(RustcDecodable,RustcEncodable,Clone)]
 pub struct Function {
     /// Unique, immutable identifier for this function.
     pub uuid: Uuid,
@@ -133,7 +134,7 @@ impl Function {
 
         for v in g.vertices() {
             match g.vertex_label(v) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     let mut prev_mne = None;
 
                     for mne in &bb.mnemonics {
@@ -149,7 +150,7 @@ impl Function {
                 Some(&ControlFlowTarget::Failed(ref pos,ref msg)) => {
                     mnemonics.entry(*pos).or_insert(Vec::new()).push(MnemonicOrError::Error(*pos,msg.clone()));
                 }
-                Some(&ControlFlowTarget::Unresolved(_)) => {},
+                Some(&ControlFlowTarget::Value(_)) => {},
                 None => unreachable!(),
             }
         }
@@ -161,37 +162,37 @@ impl Function {
 
             match (src,tgt) {
                 // Resolved -> Resolved
-                (Some(&ControlFlowTarget::Resolved(ref src_bb)),Some(&ControlFlowTarget::Resolved(ref tgt_bb))) => {
+                (Some(&ControlFlowTarget::BasicBlock(ref src_bb)),Some(&ControlFlowTarget::BasicBlock(ref tgt_bb))) => {
                     let last = src_bb.mnemonics.last().map_or(src_bb.area.start,|mne| mne.area.start);
                     by_source.entry(last).or_insert(Vec::new()).push((Rvalue::new_u64(tgt_bb.area.start),gu.clone()));
                     by_destination.entry(tgt_bb.area.start).or_insert(Vec::new()).push((Rvalue::new_u64(last),gu));
                 },
                 // Resolved -> Unresolved(Constant)
-                (Some(&ControlFlowTarget::Resolved(ref src_bb)),Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: ref c,.. }))) => {
+                (Some(&ControlFlowTarget::BasicBlock(ref src_bb)),Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: ref c,.. }))) => {
                     let last = src_bb.mnemonics.last().map_or(src_bb.area.start,|mne| mne.area.start);
                     by_source.entry(last).or_insert(Vec::new()).push((Rvalue::new_u64(*c),gu.clone()));
                     by_destination.entry(*c).or_insert(Vec::new()).push((Rvalue::new_u64(last),gu));
                 },
                 // Unresolved(Constant) -> Resolved
-                (Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: ref c,.. })),Some(&ControlFlowTarget::Resolved(ref tgt_bb))) => {
+                (Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: ref c,.. })),Some(&ControlFlowTarget::BasicBlock(ref tgt_bb))) => {
                     by_source.entry(*c).or_insert(Vec::new()).push((Rvalue::new_u64(tgt_bb.area.start),gu.clone()));
                     by_destination.entry(tgt_bb.area.start).or_insert(Vec::new()).push((Rvalue::new_u64(*c),gu));
                 },
                 // Resolved -> Unresolved
-                (Some(&ControlFlowTarget::Resolved(ref src_bb)),Some(&ControlFlowTarget::Unresolved(ref r))) => {
+                (Some(&ControlFlowTarget::BasicBlock(ref src_bb)),Some(&ControlFlowTarget::Value(ref r))) => {
                     by_source.entry(src_bb.area.start).or_insert(Vec::new()).push((r.clone(),gu));
                 },
                 // Unresolved -> Resolved
-                (Some(&ControlFlowTarget::Unresolved(ref t)),Some(&ControlFlowTarget::Resolved(ref tgt_bb))) => {
+                (Some(&ControlFlowTarget::Value(ref t)),Some(&ControlFlowTarget::BasicBlock(ref tgt_bb))) => {
                     by_destination.entry(tgt_bb.area.start).or_insert(Vec::new()).push((t.clone(),gu));
                 },
                 // Failed -> Resolved
-                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::Resolved(ref tgt_bb))) => {
+                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::BasicBlock(ref tgt_bb))) => {
                     by_source.entry(*src_pos).or_insert(Vec::new()).push((Rvalue::new_u64(tgt_bb.area.start),gu.clone()));
                     by_destination.entry(tgt_bb.area.start).or_insert(Vec::new()).push((Rvalue::new_u64(*src_pos),gu));
                 },
                 // Resolved -> Failed
-                (Some(&ControlFlowTarget::Resolved(ref src_bb)),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
+                (Some(&ControlFlowTarget::BasicBlock(ref src_bb)),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
                     let last = src_bb.mnemonics.last().map_or(src_bb.area.start,|mne| mne.area.start);
                     by_source.entry(last).or_insert(Vec::new()).push((Rvalue::new_u64(*tgt_pos),gu.clone()));
                     by_destination.entry(*tgt_pos).or_insert(Vec::new()).push((Rvalue::new_u64(last),gu));
@@ -202,25 +203,25 @@ impl Function {
                     by_destination.entry(*tgt_pos).or_insert(Vec::new()).push((Rvalue::new_u64(*src_pos),gu));
                 },
                 // Failed -> Unresolved(Constant)
-                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: ref c,.. }))) => {
+                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: ref c,.. }))) => {
                     by_source.entry(*src_pos).or_insert(Vec::new()).push((Rvalue::new_u64(*c),gu.clone()));
                     by_destination.entry(*c).or_insert(Vec::new()).push((Rvalue::new_u64(*src_pos),gu));
                 },
                 // Unresolved(Constant) -> Failed
-                (Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: ref c,.. })),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
+                (Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: ref c,.. })),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
                     by_source.entry(*c).or_insert(Vec::new()).push((Rvalue::new_u64(*tgt_pos),gu.clone()));
                     by_destination.entry(*tgt_pos).or_insert(Vec::new()).push((Rvalue::new_u64(*c),gu));
                 },
                 // Failed -> Unresolved
-                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::Unresolved(ref r))) => {
+                (Some(&ControlFlowTarget::Failed(ref src_pos,_)),Some(&ControlFlowTarget::Value(ref r))) => {
                     by_source.entry(*src_pos).or_insert(Vec::new()).push((r.clone(),gu));
                 },
                 // Unresolved -> Failed
-                (Some(&ControlFlowTarget::Unresolved(ref t)),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
+                (Some(&ControlFlowTarget::Value(ref t)),Some(&ControlFlowTarget::Failed(ref tgt_pos,_))) => {
                     by_destination.entry(*tgt_pos).or_insert(Vec::new()).push((t.clone(),gu));
                 },
                 // Unresolved -> Unresolved
-                (Some(&ControlFlowTarget::Unresolved(_)),Some(&ControlFlowTarget::Unresolved(_))) => {},
+                (Some(&ControlFlowTarget::Value(_)),Some(&ControlFlowTarget::Value(_))) => {},
                 (None,_) | (_,None) => unreachable!()
             }
         }
@@ -259,7 +260,7 @@ impl Function {
                         let bb = BasicBlock::from_vec(bblock.clone());
 
                         bblock.clear();
-                        ret.add_vertex(ControlFlowTarget::Resolved(bb));
+                        ret.add_vertex(ControlFlowTarget::BasicBlock(bb));
                     }
                 }
             }
@@ -278,7 +279,7 @@ impl Function {
 
         // last basic block
         if !bblock.is_empty() {
-            ret.add_vertex(ControlFlowTarget::Resolved(BasicBlock::from_vec(bblock)));
+            ret.add_vertex(ControlFlowTarget::BasicBlock(BasicBlock::from_vec(bblock)));
         }
 
         // connect basic blocks
@@ -287,18 +288,18 @@ impl Function {
 
                     let from_bb = ret.vertices().find(|&t| {
                         match ret.vertex_label(t) {
-                            Some(&ControlFlowTarget::Resolved(ref bb)) => bb.mnemonics.last().map_or(false,|x| x.area.start == *src_off),
-                            Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: v,.. })) => v == *src_off,
-                            Some(&ControlFlowTarget::Unresolved(_)) => false,
+                            Some(&ControlFlowTarget::BasicBlock(ref bb)) => bb.mnemonics.last().map_or(false,|x| x.area.start == *src_off),
+                            Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: v,.. })) => v == *src_off,
+                            Some(&ControlFlowTarget::Value(_)) => false,
                             Some(&ControlFlowTarget::Failed(pos,_)) => pos == *src_off,
                             None => unreachable!()
                         }
                     });
                     let to_bb = ret.vertices().find(|&t| {
                         match (tgt,ret.vertex_label(t)) {
-                            (&Rvalue::Constant{ value,.. },Some(&ControlFlowTarget::Resolved(ref bb))) => bb.area.start == value,
+                            (&Rvalue::Constant{ value,.. },Some(&ControlFlowTarget::BasicBlock(ref bb))) => bb.area.start == value,
                             (&Rvalue::Constant{ value,.. },Some(&ControlFlowTarget::Failed(pos,_))) => pos == value,
-                            (rv,Some(&ControlFlowTarget::Unresolved(ref v))) => *v == *rv,
+                            (rv,Some(&ControlFlowTarget::Value(ref v))) => *v == *rv,
                             (_,None) => unreachable!(),
                             _ => false
                         }
@@ -307,17 +308,17 @@ impl Function {
                     match (from_bb,to_bb) {
                         (Some(from),Some(to)) => { ret.add_edge(gu.clone(),from,to); },
                         (None,Some(to)) => {
-                            if let Some(&ControlFlowTarget::Resolved(ref bb)) = ret.vertex_label(to) {
+                            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = ret.vertex_label(to) {
                                 if bb.area.start <= *src_off && bb.area.end > *src_off {
                                     continue;
                                 }
                             }
 
-                            let vx = ret.add_vertex(ControlFlowTarget::Unresolved(Rvalue::new_u64(*src_off)));
+                            let vx = ret.add_vertex(ControlFlowTarget::Value(Rvalue::new_u64(*src_off)));
                             ret.add_edge(gu.clone(),vx,to);
                         },
                         (Some(from),None) => {
-                            if let Some(&ControlFlowTarget::Resolved(ref bb)) = ret.vertex_label(from) {
+                            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = ret.vertex_label(from) {
                                 if let &Rvalue::Constant{ value,.. } = tgt {
                                     if bb.area.start <= value && bb.area.end > value {
                                         continue;
@@ -325,7 +326,7 @@ impl Function {
                                 }
                             }
 
-                            let vx = ret.add_vertex(ControlFlowTarget::Unresolved(tgt.clone()));
+                            let vx = ret.add_vertex(ControlFlowTarget::Value(tgt.clone()));
                             ret.add_edge(gu.clone(),from,vx);
                         },
                         _ => trace!("jump from 0x{:x} to {} doesn't hit any blocks",src_off,tgt),
@@ -352,6 +353,17 @@ impl Function {
     where A: Debug, A::Configuration: Debug {
         let (mut mnemonics,mut by_source,mut by_destination) = Self::index_cflow_graph(&func.cflow_graph);
         let mut todo = HashSet::<u64>::new();
+        let entry_addr = func.entry_point.and_then(|vx| {
+            match func.cflow_graph.vertex_label(vx) {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
+                    Some(bb.area.start)
+                }
+                Some(&ControlFlowTarget::Value(Rvalue::Constant{ value,.. })) => {
+                    Some(value)
+                }
+                _ => None
+            }
+        }).unwrap_or(start);
 
         todo.insert(start);
 
@@ -416,18 +428,15 @@ impl Function {
         }
 
         func.cflow_graph = Self::assemble_cflow_graph(mnemonics,by_source,by_destination,start);
-        let entry_addr = func.entry_point.and_then(|x| {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(x) {
-                Some(bb.area.start)
-            } else {
-                None
-            }
-        }).unwrap_or(start);
         func.entry_point = func.cflow_graph.vertices().find(|&vx| {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
-                bb.area.start == entry_addr
-            } else {
-                false
+            match func.cflow_graph.vertex_label(vx) {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
+                    bb.area.start == entry_addr
+                }
+                Some(&ControlFlowTarget::Value(Rvalue::Constant{ value,.. })) => {
+                    value == entry_addr
+                }
+                _ => false
             }
         });
 
@@ -435,13 +444,28 @@ impl Function {
     }
 
     /// Returns all call targets.
+    pub fn collect_resolved_calls(&self) -> Vec<CallTarget> {
+        let mut ret = Vec::new();
+        for vx in self.cflow_graph.vertices() {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = self.cflow_graph.vertex_label(vx) {
+                bb.execute(|i| match i {
+                    &Statement::ResolvedCall{ function: ref ct, ..} => ret.push(ct.clone()),
+                    _ => {}
+                });
+            }
+        }
+
+        ret
+    }
+
+    /// Returns all call targets.
     pub fn collect_calls(&self) -> Vec<Rvalue> {
         let mut ret = Vec::new();
 
         for vx in self.cflow_graph.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = self.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = self.cflow_graph.vertex_label(vx) {
                 bb.execute(|i| match i {
-                    &Statement::Call{ target: ref t, ..} => ret.push(t.clone()),
+                    &Statement::UnresolvedCall{ target: ref t, ..} => ret.push(t.clone()),
                     _ => {}
                 });
             }
@@ -455,7 +479,7 @@ impl Function {
     pub fn find_basic_block_at_address(&self,a: u64) -> Option<ControlFlowRef> {
         self.cflow_graph.vertices().find(|&x| {
             match self.cflow_graph.vertex_label(x) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     bb.area.start <= a && bb.area.end > a
                 },
                 _ => false
@@ -476,7 +500,7 @@ impl Function {
 
         for v in self.cflow_graph.vertices() {
             match self.cflow_graph.vertex_label(v) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     ret = format!("{}\n{} [label=<<table border=\"0\"><tr><td>{}:{}</td></tr>",ret,v.0,bb.area.start,bb.area.end);
 
                     for mne in bb.mnemonics.iter() {
@@ -488,7 +512,7 @@ impl Function {
 
                     ret = format!("{}</table>>,shape=record];",ret);
                 },
-                Some(&ControlFlowTarget::Unresolved(ref c)) => {
+                Some(&ControlFlowTarget::Value(ref c)) => {
                     ret = format!("{}\n{} [label=\"{:?}\",shape=circle];",ret,v.0,c);
                 }
                 _ => {
@@ -507,6 +531,21 @@ impl Function {
 
         format!("{}\n}}",ret)
     }
+
+    pub fn resolve_function(&mut self, entry: u64, func: &FunctionRef) {
+   let mut ret = Vec::new();
+        for vx in self.cflow_graph.vertices() {
+            if let Some(&mut ControlFlowTarget::BasicBlock(ref mut bb)) = self.cflow_graph.vertex_label_mut(vx) {
+                bb.rewrite(|i| match i {
+                    &mut Statement::UnresolvedCall{ target: Rvaluefunction: ref ct, ..} => ret.push(ct.clone()),
+                    _ => {}
+                });
+            }
+        }
+
+        ret
+    }
+
 }
 
 #[cfg(test)]
@@ -598,9 +637,9 @@ mod tests {
         let bb2 = BasicBlock::from_vec(vec!(
                 Mnemonic::dummy(6..10)));
 
-        let vx0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let vx1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
-        let vx2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
+        let vx0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let vx1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
+        let vx2 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb2));
 
         cfg.add_edge(Guard::always(),vx0,vx1);
         cfg.add_edge(Guard::always(),vx1,vx1);
@@ -619,7 +658,7 @@ mod tests {
         assert_eq!(cfg_re.num_edges(), 4);
 
         for vx in cfg_re.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg_re.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = cfg_re.vertex_label(vx) {
                 assert!(
                     (bb.area.start == 0 && bb.area.end == 6) ||
                     (bb.area.start == 10 && bb.area.end == 16) ||
@@ -631,8 +670,8 @@ mod tests {
         }
 
         for e in cfg_re.edges() {
-            if let Some(&ControlFlowTarget::Resolved(ref from)) = cfg_re.vertex_label(cfg_re.source(e)) {
-                if let Some(&ControlFlowTarget::Resolved(ref to)) = cfg_re.vertex_label(cfg_re.target(e)) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref from)) = cfg_re.vertex_label(cfg_re.source(e)) {
+                if let Some(&ControlFlowTarget::BasicBlock(ref to)) = cfg_re.vertex_label(cfg_re.target(e)) {
                     assert!(
                         (from.area.start == 0 && to.area.start == 10) ||
                         (from.area.start == 10 && to.area.start == 10) ||
@@ -657,11 +696,11 @@ mod tests {
         let bb1 = BasicBlock::from_vec(vec!(
                 Mnemonic::dummy(10..11)));
 
-        let vx0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let vx1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
-        let vx2 = cfg.add_vertex(ControlFlowTarget::Unresolved(Rvalue::new_u32(42)));
-        let vx3 = cfg.add_vertex(ControlFlowTarget::Unresolved(Rvalue::new_u32(23)));
-        let vx4 = cfg.add_vertex(ControlFlowTarget::Unresolved(Rvalue::Variable{ name: Cow::Borrowed("a"), size: 8, offset: 0, subscript: None }));
+        let vx0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let vx1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
+        let vx2 = cfg.add_vertex(ControlFlowTarget::Value(Rvalue::new_u32(42)));
+        let vx3 = cfg.add_vertex(ControlFlowTarget::Value(Rvalue::new_u32(23)));
+        let vx4 = cfg.add_vertex(ControlFlowTarget::Value(Rvalue::Variable{ name: Cow::Borrowed("a"), size: 8, offset: 0, subscript: None }));
 
         cfg.add_edge(Guard::always(),vx0,vx1);
         cfg.add_edge(Guard::always(),vx2,vx1);
@@ -681,13 +720,13 @@ mod tests {
 
         for vx in cfg_re.vertices() {
             match cfg_re.vertex_label(vx) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     assert!(
                         (bb.area.start == 0 && bb.area.end == 1) ||
                         (bb.area.start == 10 && bb.area.end == 11)
                     );
                 },
-                Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: ref c, size: 64 })) => {
+                Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: ref c, size: 64 })) => {
                     assert!(*c == 42 || *c == 23);
                 },
                 _ => { unreachable!(); }
@@ -711,7 +750,7 @@ mod tests {
         assert_eq!(func.cflow_graph.num_edges(), 0);
 
         if let Some(vx) = func.cflow_graph.vertices().next() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
                 assert_eq!(bb.mnemonics.len(), 1);
                 assert_eq!(bb.mnemonics[0].opcode, "A".to_string());
                 assert_eq!(bb.mnemonics[0].area, Bound::new(0,1));
@@ -779,7 +818,7 @@ mod tests {
         let mut ures_vx = None;
 
         for vx in func.cflow_graph.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
                 assert_eq!(bb.mnemonics.len(), 6);
                 assert_eq!(bb.mnemonics[0].opcode, "test0".to_string());
                 assert_eq!(bb.mnemonics[0].area, Bound::new(0,1));
@@ -843,7 +882,7 @@ mod tests {
         let mut ures_vx = None;
 
         for vx in func.cflow_graph.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
                 if bb.area.start == 0 {
                     assert_eq!(bb.mnemonics.len(), 1);
                     assert_eq!(bb.mnemonics[0].opcode, "test0".to_string());
@@ -910,7 +949,7 @@ mod tests {
         assert_eq!(func.cflow_graph.num_edges(), 1);
 
         let vx = func.cflow_graph.vertices().next().unwrap();
-        if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+        if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
             if bb.area.start == 0 {
                 assert_eq!(bb.mnemonics.len(), 3);
                 assert_eq!(bb.mnemonics[0].opcode, "test0".to_string());
@@ -969,8 +1008,8 @@ mod tests {
     fn entry_split() {
         let bb = BasicBlock::from_vec(vec!(Mnemonic::dummy(0..1),Mnemonic::dummy(1..2)));
         let mut fun = Function::new("test_func".to_string(),"ram".to_string());
-        let vx0 = fun.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb));
-        let vx1 = fun.cflow_graph.add_vertex(ControlFlowTarget::Unresolved(Rvalue::new_u32(2)));
+        let vx0 = fun.cflow_graph.add_vertex(ControlFlowTarget::BasicBlock(bb));
+        let vx1 = fun.cflow_graph.add_vertex(ControlFlowTarget::Value(Rvalue::new_u32(2)));
 
         fun.entry_point = Some(vx0);
         fun.cflow_graph.add_edge(Guard::always(),vx0,vx1);
@@ -1006,7 +1045,7 @@ mod tests {
         let mut bb2_vx = None;
 
         for vx in func.cflow_graph.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
                 if bb.area.start == 0 {
                     assert_eq!(bb.mnemonics.len(), 1);
                     assert_eq!(bb.mnemonics[0].opcode, "dummy".to_string());
@@ -1079,7 +1118,7 @@ mod tests {
 
         for vx in func.cflow_graph.vertices() {
             match func.cflow_graph.vertex_label(vx) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     if bb.area.start == 0 {
                         assert_eq!(bb.mnemonics.len(), 2);
                         assert_eq!(bb.area, Bound::new(0,4));
@@ -1132,7 +1171,7 @@ mod tests {
         let mut bb1_vx = None;
 
         for vx in func.cflow_graph.vertices() {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
                 if bb.area.start == 0 {
                     assert_eq!(bb.mnemonics.len(), 1);
                     assert_eq!(bb.area, Bound::new(0,1));

@@ -95,7 +95,10 @@ pub fn metainfo(arg: &Variant) -> Variant {
                     let calls = prog.call_graph.out_edges(vx).
                         map(|x| prog.call_graph.target(x)).
                         filter_map(|x| prog.call_graph.vertex_label(x)).
-                        map(|&CallTarget::Function(ref uuid)| uuid.to_string()).
+                        map(|ct| match ct {
+                            &CallTarget::Function(ref uuid) => uuid.to_string(),
+                            &CallTarget::Stub(ref name) => name.clone().to_string(),
+                        }).
                         collect();
 
                     let func_guard = func_ref.read();
@@ -104,11 +107,11 @@ pub fn metainfo(arg: &Variant) -> Variant {
                         &Function{ ref uuid, ref name, entry_point: Some(ref ent), cflow_graph: ref cg,..} => {
                             // match entry point
                             match cg.vertex_label(*ent) {
-                                Some(&ControlFlowTarget::Resolved(ref bb)) =>
+                                Some(&ControlFlowTarget::BasicBlock(ref bb)) =>
                                     return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(bb.area.start), calls: calls })),
-                                    Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ value: c,.. })) =>
+                                    Some(&ControlFlowTarget::Value(Rvalue::Constant{ value: c,.. })) =>
                                         return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(c), calls: calls })),
-                                    Some(&ControlFlowTarget::Unresolved(_)) =>
+                                    Some(&ControlFlowTarget::Value(_)) =>
                                         return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: None, calls: calls })),
                                     Some(&ControlFlowTarget::Failed(pos,_)) =>
                                         return_json(Ok(Metainfo{ kind: "function", name: Some(name.clone()), uuid: uuid.to_string(), entry_point: Some(pos), calls: calls })),
@@ -215,7 +218,7 @@ pub fn control_flow_graph(arg: &Variant) -> Variant {
 
                     // entry
                     let entry = if let Some(ent) = fun.entry_point {
-                        if let Some(a@&ControlFlowTarget::Resolved(_)) = cfg.vertex_label(ent) {
+                        if let Some(a@&ControlFlowTarget::BasicBlock(_)) = cfg.vertex_label(ent) {
                             Some(to_ident(a))
                         } else {
                             None
@@ -236,7 +239,7 @@ pub fn control_flow_graph(arg: &Variant) -> Variant {
                     let code = cfg.vertices().filter_map(|x| {
                         let lb = cfg.vertex_label(x);
                         match lb {
-                            Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                            Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                                 let mnes = bb.mnemonics.iter().filter_map(|x| {
                                     if x.opcode.starts_with("__") {
                                         None
@@ -333,7 +336,7 @@ pub fn control_flow_graph(arg: &Variant) -> Variant {
                     let targets = cfg.vertices().filter_map(|x| {
                         let lb = cfg.vertex_label(x);
                         match lb {
-                            Some(&ControlFlowTarget::Unresolved(ref rv)) =>
+                            Some(&ControlFlowTarget::Value(ref rv)) =>
                                 Some((to_ident(lb.unwrap()),format!("{}",rv))),
                             _ => None,
                         }
@@ -583,9 +586,9 @@ pub fn file_details(arg: &Variant) -> Variant {
 /// Returns the unique string identifier for `t`.
 fn to_ident(t: &ControlFlowTarget) -> String {
     match t {
-        &ControlFlowTarget::Resolved(ref bb) =>
+        &ControlFlowTarget::BasicBlock(ref bb) =>
             format!("bb{}",bb.area.start),
-        &ControlFlowTarget::Unresolved(ref c) => {
+        &ControlFlowTarget::Value(ref c) => {
             let ref mut h = SipHasher::new();
             c.hash::<SipHasher>(h);
             format!("c{}",h.finish())

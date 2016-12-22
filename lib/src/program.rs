@@ -51,12 +51,11 @@ use {
 };
 
 /// Node of the program call graph.
-#[derive(RustcDecodable,RustcEncodable)]
+#[derive(Debug,Hash,Clone,PartialEq,Eq,RustcDecodable,RustcEncodable)]
 pub enum CallTarget {
     /// Resolved and disassembled function.
     Function(Uuid),
-    // Resolved but not yet disassembled function.
-    //Todo{ address: Rvalue, name: Option<Cow<'static,str>> },
+    Stub(Cow<'static,str>),
 }
 
 /// Graph of functions/symbolic references
@@ -75,12 +74,11 @@ pub struct Program {
     /// Graph of functions
     pub call_graph: CallGraph,
     pub functions: HashMap<Uuid,FunctionRef>,
-    pub symbolic: HashMap<u64,u64>,
 }
 
 impl Decodable for Program {
     fn decode<D: Decoder>(d: &mut D) -> Result<Program, D::Error> {
-        d.read_struct("Program", 5, |d| {
+        d.read_struct("Program", 4, |d| {
             let uuid = try!(d.read_struct_field("uuid", 0, |d| { Uuid::decode(d) }));
             let name = try!(d.read_struct_field("name", 1, |d| { Cow::decode(d) }));
             let mut call_graph = try!(d.read_struct_field("call_graph", 2, |d| { CallGraph::decode(d) }));
@@ -110,14 +108,12 @@ impl Decodable for Program {
                     Ok(map)
                 })
             }));
-            let symbolic = try!(d.read_struct_field("symbolic", 4, |d| { HashMap::decode(d) }));
 
             Ok(Program{
                 uuid: uuid,
                 name: name,
                 call_graph: call_graph,
                 functions: functions,
-                symbolic: symbolic
             })
         })
     }
@@ -125,7 +121,7 @@ impl Decodable for Program {
 
 impl Encodable for Program {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        s.emit_struct("Program", 2, |s| {
+        s.emit_struct("Program", 4, |s| {
             try!(s.emit_struct_field("uuid", 0, |s| {
                 self.uuid.encode(s)
             }));
@@ -144,9 +140,6 @@ impl Encodable for Program {
                     Ok(())
                 })
             }));
-            try!(s.emit_struct_field("symbolic", 4, |s| {
-                self.symbolic.encode(s)
-            }));
             Ok(())
         })
     }
@@ -160,7 +153,6 @@ impl Program {
             name: n,
             call_graph: CallGraph::new(),
             functions: HashMap::new(),
-            symbolic: HashMap::new(),
         }
     }
 
@@ -171,7 +163,7 @@ impl Program {
 
             if let Some(entry) = func.entry_point {
                 let cfg = &func.cflow_graph;
-                if let Some(&ControlFlowTarget::Resolved(ref ee)) = cfg.vertex_label(entry) {
+                if let Some(&ControlFlowTarget::BasicBlock(ref ee)) = cfg.vertex_label(entry) {
                     ee.area.start == a
                 } else {
                     false
@@ -222,7 +214,7 @@ impl Program {
             for w in self.call_graph.vertices() {
                 match self.call_graph.vertex_label(w) {
                     Some(&CallTarget::Concrete(Function{ cflow_graph: ref cg, entry_point: Some(ent),.. })) => {
-                        if let Some(&ControlFlowTarget::Resolved(ref bb)) = cg.vertex_label(ent) {
+                        if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = cg.vertex_label(ent) {
                             if let Rvalue::Constant{ ref value,.. } = a {
                                 if *value == bb.area.start {
                                     other_funs.push(w);
@@ -303,7 +295,7 @@ mod tests {
         let mut func = Function::new("test2".to_string(),"ram".to_string());
 
         let bb0 = BasicBlock::from_vec(vec!(Mnemonic::dummy(0..10)));
-        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb0)));
+        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::BasicBlock(bb0)));
 
         prog.call_graph.add_vertex(CallTarget::Concrete(Function::new("test".to_string(),"ram".to_string())));
         let vx1 = prog.call_graph.add_vertex(CallTarget::Function(func));
@@ -328,7 +320,7 @@ mod tests {
 
         let mut func = Function::with_uuid("test3".to_string(),uu.clone(),"ram".to_string());
         let bb0 = BasicBlock::from_vec(vec!(Mnemonic::dummy(12..20)));
-        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb0)));
+        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::BasicBlock(bb0)));
         let uuf = func.uuid.clone();
 
         let new = prog.insert(CallTarget::Concrete(func));
@@ -362,7 +354,7 @@ mod tests {
         let i1 = vec![Statement::Operation{ op: Operation::Call(Rvalue::new_u64(12)), assignee: Lvalue::Undefined}];
         let mne1 = Mnemonic::new(0..10,"call".to_string(),"12".to_string(),ops1.iter(),i1.iter()).ok().unwrap();
         let bb0 = BasicBlock::from_vec(vec!(mne1));
-        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::Resolved(bb0)));
+        func.entry_point = Some(func.cflow_graph.add_vertex(ControlFlowTarget::BasicBlock(bb0)));
         let uuf = func.uuid.clone();
 
         let new = prog.insert(CallTarget::Concrete(func));

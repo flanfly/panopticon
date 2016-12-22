@@ -29,9 +29,7 @@ chrono = "0.2"
 chrono-humanize = "0.0.6"
 rayon = "*"
 parking_lot = "*"
-
-[dependencies.goblin]
-git = "https://github.com/m4b/goblin.git"
+goblin = "0.0.6"
 
 [dev-dependencies]
 regex = "0.1"

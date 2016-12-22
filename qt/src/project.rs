@@ -42,6 +42,8 @@ use panopticon::amd64;
 use panopticon::mos;
 use panopticon::avr;
 
+use std::ops::Range;
+use std::borrow::Cow;
 use std::path::Path;
 use std::thread;
 use std::collections::{
@@ -156,22 +158,22 @@ pub fn create_elf_project(_path: &Variant) -> Variant {
    // use panopticon::avr;
     Variant::String(if let &Variant::String(ref s) = _path {
         match elf::load(Path::new(s)) {
-            Ok((proj,f,todo)) => {
+            Ok((proj,symtbl,f,todo)) => {
                 let sess = Session{ project: proj, todo: todo };
                 match f {
                     elf::Machine::Ia32 => {
                         let ret = return_json(Controller::replace(sess,None));
-                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Protected);
+                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Protected,&symtbl);
                         ret
                     }
                     elf::Machine::Amd64 => {
                         let ret = return_json(Controller::replace(sess,None));
-                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Long);
+                        queue_all_todos::<amd64::Amd64>(amd64::Mode::Long,&symtbl);
                         ret
                     }
                     elf::Machine::Avr => {
                         let ret = return_json(Controller::replace(sess,None));
-                        queue_all_todos::<avr::Avr>(avr::Mcu::atmega88());
+                        queue_all_todos::<avr::Avr>(avr::Mcu::atmega88(),&symtbl);
                         ret
                     }
                 }
@@ -237,7 +239,8 @@ pub fn set_request(_req: &Variant) -> Variant {
 }
 
 /// Starts disassembly
-pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration) where A::Configuration: Debug + Sync, A::Token: Sync + Send {
+pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration, symtbl: &HashMap<Range<u64>,Cow<'static,str>>)
+where A::Configuration: Debug + Sync, A::Token: Sync + Send {
     Controller::modify(|mut sess| -> Result<()> {
         for (uuid,entry,region_name,maybe_name) in sess.todo.drain(..) {
             let func_ref = if let Some(mut prog) = sess.project.find_program_by_uuid_mut(&uuid) {
@@ -246,7 +249,7 @@ pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration
 
                 let mut func = Function::new(maybe_name.map(|x| (*x.to_owned()).to_string()).unwrap_or("".to_string()),(*region_name.to_owned()).to_string());
                 let uuid = func.uuid.clone();
-                let ent = func.cflow_graph.add_vertex(ControlFlowTarget::Unresolved(Rvalue::Constant{ value: entry, size: 64 }));
+                let ent = func.cflow_graph.add_vertex(ControlFlowTarget::Value(Rvalue::Constant{ value: entry, size: 64 }));
                 let vx = prog.call_graph.add_vertex(CallTarget::Function(uuid.clone()));
 
                 func.entry_point = Some(ent);
@@ -258,11 +261,16 @@ pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration
                 return Err("can't find program".into());
             };
 
-            let world = &sess.project.data;
-            if let Some(ref prog) = sess.project.find_program_by_uuid(&uuid) {
-                if let Some(ref region) = world.dependencies.vertex_label(world.root) {
-                    use pipeline;
-                    println!("{:?}",pipeline::run_disassembler(vec![func_ref],&prog,region));
+            let &mut Project{ ref mut code, ref data,.. } = &mut sess.project;
+            if let Some(ref region) = data.dependencies.vertex_label(data.root) {
+                use pipeline;
+
+                let entries = vec![CallTarget::Function(func_ref.0.read().uuid.clone())];
+                println!("{:?}",pipeline::run_disassembler(entries,&mut code[0],region,symtbl));
+                let prog: &Program = &code[0];
+                for func_ref in prog.functions.iter() {
+                    let func = &*(func_ref.1).0.read();
+                    //println!("{}: {}",func.uuid,func.to_dot());
                 }
             }
         }
@@ -361,7 +369,7 @@ pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration
 
                                 for &vx in vxs.iter() {
                                     let maybe_lb = func.cflow_graph.vertex_label_mut(vx);
-                                    if let Some(&mut ControlFlowTarget::Unresolved(ref mut var@Rvalue::Variable{..})) = maybe_lb {
+                                    if let Some(&mut ControlFlowTarget::Value(ref mut var@Rvalue::Variable{..})) = maybe_lb {
                                         let aval = vals.get(&Lvalue::from_rvalue(var.clone()).unwrap());
                                         if let Some(&BoundedAddrTrack::Offset{ ref region, ref offset, ref offset_size }) = aval {
                                             if region.is_none() {
@@ -463,7 +471,7 @@ pub fn queue_all_todos<A: 'static + Architecture + Debug>(_cfg: A::Configuration
                             let regs:&[&str] = A::registers(&_cfg).unwrap();
 
                             for vx in f.cflow_graph.vertices() {
-                                if let Some(&ControlFlowTarget::Resolved(ref bb)) = f.cflow_graph.vertex_label(vx) {
+                                if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = f.cflow_graph.vertex_label(vx) {
                                     bb.execute(|i| match i {
                                         &Statement::Simple{ op: Operation::Initialize(ref nam,ref sz), .. } => {
                                             if regs.iter().any(|x| x == &nam) {

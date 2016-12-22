@@ -581,7 +581,7 @@ mod tests {
 
         for x in cg.vertices() {
             match cg.vertex_label(x) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     for mne in bb.mnemonics.iter() {
                         println!("{:?}: {}",mne.area,mne.opcode);
                     }
@@ -589,7 +589,7 @@ mod tests {
                 Some(&ControlFlowTarget::Failed(ref pos, ref msg)) => {
                     println!("{:?}: {:?}",pos,msg);
                 },
-                Some(&ControlFlowTarget::Unresolved(ref v)) => {
+                Some(&ControlFlowTarget::Value(ref v)) => {
                     println!("{:?}",v);
                 },
                 None => {}
@@ -626,7 +626,7 @@ mod tests {
 
         for x in cg.vertices() {
             match cg.vertex_label(x) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     for mne in bb.mnemonics.iter() {
                         println!("{:?}: {}",mne.area,mne.opcode);
                     }
@@ -634,7 +634,7 @@ mod tests {
                 Some(&ControlFlowTarget::Failed(ref pos, ref msg)) => {
                     println!("{:?}: {:?}",pos,msg);
                 },
-                Some(&ControlFlowTarget::Unresolved(ref v)) => {
+                Some(&ControlFlowTarget::Value(ref v)) => {
                     println!("{:?}",v);
                 },
                 None => {}
@@ -673,7 +673,7 @@ mod tests {
 
         for x in cg.vertices() {
             match cg.vertex_label(x) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     for mne in bb.mnemonics.iter() {
                         println!("{:?}: {}",mne.area,mne.opcode);
                     }
@@ -681,7 +681,7 @@ mod tests {
                 Some(&ControlFlowTarget::Failed(ref pos, ref msg)) => {
                     println!("{:?}: {:?}",pos,msg);
                 },
-                Some(&ControlFlowTarget::Unresolved(ref v)) => {
+                Some(&ControlFlowTarget::Value(ref v)) => {
                     println!("{:?}",v);
                 },
                 None => {}
@@ -726,7 +726,7 @@ mod tests {
 
         for v in cfg.vertices() {
             match cfg.vertex_label(v) {
-                Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                Some(&ControlFlowTarget::BasicBlock(ref bb)) => {
                     if bb.area.start == 0 {
                         assert_eq!(bb.mnemonics.len(), 9);
                         assert_eq!(bb.area.end, 12);
@@ -734,7 +734,7 @@ mod tests {
                         assert_eq!(cfg.in_degree(v), 1);
 
                         for e in cfg.out_edges(v) {
-                            if let Some(&ControlFlowTarget::Resolved(ref cc)) = cfg.vertex_label(cfg.target(e)) {
+                            if let Some(&ControlFlowTarget::BasicBlock(ref cc)) = cfg.vertex_label(cfg.target(e)) {
                                 assert!(cc.area.start == 0 || cc.area.start == 12);
                             } else {
                                 unreachable!();
@@ -742,7 +742,7 @@ mod tests {
                         }
 
                         for e in cfg.in_edges(v) {
-                            if let Some(&ControlFlowTarget::Resolved(ref cc)) = cfg.vertex_label(cfg.source(e)) {
+                            if let Some(&ControlFlowTarget::BasicBlock(ref cc)) = cfg.vertex_label(cfg.source(e)) {
                                 assert!(cc.area.start == 0);
                             } else {
                                 unreachable!();
@@ -763,7 +763,7 @@ mod tests {
                         }
 
                         for e in cfg.in_edges(v) {
-                            if let Some(&ControlFlowTarget::Resolved(ref cc)) = cfg.vertex_label(cfg.source(e)) {
+                            if let Some(&ControlFlowTarget::BasicBlock(ref cc)) = cfg.vertex_label(cfg.source(e)) {
                                 assert!(cc.area.start == 0);
                             } else {
                                 unreachable!();
@@ -795,9 +795,9 @@ mod tests {
 
     fn to_ident(t: Option<&ControlFlowTarget>) -> Option<String> {
         match t {
-            Some(&ControlFlowTarget::Resolved(ref bb)) => Some(format!("\"bb{}\"",bb.area.start)),
-            Some(&ControlFlowTarget::Unresolved(Rvalue::Constant{ ref value,.. })) => Some(format!("\"v{}\"",*value)),
-            Some(&ControlFlowTarget::Unresolved(ref c)) => {
+            Some(&ControlFlowTarget::BasicBlock(ref bb)) => Some(format!("\"bb{}\"",bb.area.start)),
+            Some(&ControlFlowTarget::Value(Rvalue::Constant{ ref value,.. })) => Some(format!("\"v{}\"",*value)),
+            Some(&ControlFlowTarget::Value(ref c)) => {
                 let ref mut h = SipHasher::new();
                 c.hash::<SipHasher>(h);
                 Some(format!("\"c{}\"",h.finish()))

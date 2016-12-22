@@ -89,7 +89,7 @@ pub struct ProgramPoint {
 }
 
 /// Abstract Domain. Models both under- and over-approximation.
-pub trait Avalue: Clone + PartialEq + Eq + Hash + Debug + Encodable + Decodable {
+pub trait Avalue: Clone + PartialEq + Eq + Hash + Debug + Encodable + Decodable + Send + Sync {
     /// Alpha function. Returns domain element that approximates the concrete value the best
     fn abstract_value(&Rvalue) -> Self;
     /// Alpha function. Returns domain element that approximates the concrete value that fullfil
@@ -172,7 +172,7 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
                           _: &HashMap<Lvalue,A>, sizes: &HashMap<Cow<'static,str>,usize>,
                           ret: &mut HashMap<(Cow<'static,str>,usize),A>, reg: Option<&Region>,
                           sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<bool> {
-        if let Some(&ControlFlowTarget::Resolved(ref bb)) = graph.vertex_label(t) {
+        if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = graph.vertex_label(t) {
             let mut change = false;
             let mut pos = 0usize;
             bb.execute(|i| {
@@ -208,13 +208,14 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
                 match i {
                     &Statement::Simple{ ref op, ref assignee } =>
                         exec_single_rreil_instr(op,assignee),
-                    &Statement::Call{ ref writes,.. } =>
+                    &Statement::ResolvedCall{ ref writes,.. } =>
                         for w in writes.iter() {
                             if let &Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = w {
                                 // TODO
                                 exec_single_rreil_instr(&Operation::Move(Rvalue::Undefined),w);
                             }
-                        }
+                        },
+                    &Statement::UnresolvedCall{ .. } => {}
                 }
             });
 
@@ -242,7 +243,7 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
     let mut constr = HashMap::<Lvalue,A>::new();
 
     for vx in func.cflow_graph.vertices() {
-        if let Some(&ControlFlowTarget::Resolved(ref bb)) = func.cflow_graph.vertex_label(vx) {
+        if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = func.cflow_graph.vertex_label(vx) {
             bb.execute(|i| {
                 match i {
                     &Statement::Simple{ assignee: Lvalue::Variable{ ref name, ref size,.. },.. } => {
@@ -250,7 +251,7 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
                         let s = *sizes.get(name).unwrap_or(&t);
                         sizes.insert(name.clone(),max(s,t));
                     }
-                    &Statement::Call{ ref writes,.. } => {
+                    &Statement::ResolvedCall{ ref writes,.. } => {
                         for lv in writes.iter() {
                             if let &Lvalue::Variable{ ref name, ref size,.. } = lv {
                                 let t = *size;
@@ -336,13 +337,13 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
     let mut names = HashSet::<Cow<'static,str>>::new();
 
     for vx in cfg.vertices() {
-        if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg.vertex_label(vx) {
+        if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = cfg.vertex_label(vx) {
             bb.execute(|i| {
                 match i {
                     &Statement::Simple{ assignee: Lvalue::Variable{ ref name, ref size,.. },.. } => {
                         names.insert(name.clone());
                     }
-                    &Statement::Call{ ref writes,.. } => {
+                    &Statement::ResolvedCall{ ref writes,.. } => {
                         for lv in writes.iter() {
                             if let &Lvalue::Variable{ ref name, ref size,.. } = lv {
                                 names.insert(name.clone());
@@ -357,7 +358,7 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
 
     for v in cfg.vertices() {
         if cfg.out_degree(v) == 0 {
-            if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg.vertex_label(v) {
+            if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = cfg.vertex_label(v) {
                 for lv in names.iter() {
                     let mut bbv = (bb,v);
 
@@ -373,7 +374,7 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
                                         }
                                     }
                                 }
-                                &Statement::Call{ ref writes,.. } => {
+                                &Statement::ResolvedCall{ ref writes,.. } => {
                                     for w in writes.iter() {
                                         if let &Lvalue::Variable{ ref name, ref size,.. } = w {
                                             if name == lv {
@@ -383,6 +384,7 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
                                         }
                                     }
                                 }
+                                &Statement::UnresolvedCall{ .. } => {}
                             }
                         });
 
@@ -392,7 +394,7 @@ pub fn results<A: Avalue>(func: &Function,vals: &HashMap<Lvalue,A>) -> HashMap<(
 
                             if !fixpoint {
                                 if let Some(w) = next_bb {
-                                    if let Some(&ControlFlowTarget::Resolved(ref bb)) = cfg.vertex_label(w) {
+                                    if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = cfg.vertex_label(w) {
                                         bbv = (bb,w);
                                         continue;
                                     }
@@ -729,9 +731,9 @@ mod tests {
         let mut cfg = ControlFlowGraph::new();
 
         let g = Guard::from_flag(&flag.clone().into()).ok().unwrap();
-        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
-        let v2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
+        let v0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
+        let v2 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb2));
 
         cfg.add_edge(g.negation(),v0,v2);
         cfg.add_edge(g.negation(),v1,v2);
@@ -787,9 +789,9 @@ mod tests {
                                        Mnemonic::new(7..8,"use b".to_string(),"".to_string(),vec![].iter(),vec![
                                                      Statement{ op: Operation::Move(b_var.clone().into()), assignee: b_var.clone()}].iter()).ok().unwrap()]);
         let mut cfg = ControlFlowGraph::new();
-        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
-        let v2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
+        let v0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
+        let v2 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb2));
 
         let g = Guard::from_flag(&flag.clone().into()).ok().unwrap();
 
@@ -873,11 +875,11 @@ mod tests {
 
         let mut cfg = ControlFlowGraph::new();
 
-        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
-        let v2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
-        let v3 = cfg.add_vertex(ControlFlowTarget::Resolved(bb3));
-        let v4 = cfg.add_vertex(ControlFlowTarget::Resolved(bb4));
+        let v0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
+        let v2 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb2));
+        let v3 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb3));
+        let v4 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb4));
 
         let g = Guard::from_flag(&flag.into()).ok().unwrap();
 
@@ -927,8 +929,8 @@ mod tests {
                 Statement{ op: Operation::Move(p_var.clone().into()), assignee: next.clone()}].iter()).ok().unwrap()
         ]);
         let mut cfg = ControlFlowGraph::new();
-        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
-        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
+        let v0 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::BasicBlock(bb1));
 
         cfg.add_edge(Guard::always(),v0,v1);
 

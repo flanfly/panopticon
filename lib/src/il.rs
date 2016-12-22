@@ -117,6 +117,7 @@ use std::result;
 use std::cmp;
 
 use Result;
+use CallTarget;
 
 use rustc_serialize::{Encodable,Decodable};
 
@@ -465,6 +466,12 @@ pub enum Operation<V: Clone + PartialEq + Eq + Debug + Encodable + Decodable> {
 }
 
 #[derive(Clone,PartialEq,Eq,Debug,RustcEncodable,RustcDecodable)]
+enum FunctionPointer {
+    Value(Rvalue),
+    Symbol(Cow<'static,str>),
+}
+
+#[derive(Clone,PartialEq,Eq,Debug,RustcEncodable,RustcDecodable)]
 pub enum Statement {
     /// A single RREIL statement.
     Simple{
@@ -476,10 +483,8 @@ pub enum Statement {
     /// Function call
     Call{
         /// Call target
-        target: Rvalue,
-        reads: Vec<Rvalue>,
-        writes: Vec<Lvalue>,
-    }
+        target: FunctionPointer,
+    },
 }
 
 impl Statement {
@@ -589,7 +594,34 @@ impl Statement {
                 } else {
                     Ok(())
                 },
-            &Statement::Call{ .. } => Ok(())
+            &Statement::ResolvedCall{ ref reads, ref writes,.. } => {
+                let mut rd = reads.iter().filter_map(|rd| {
+                    match rd {
+                        &Rvalue::Variable{ ref name, .. } => Some(name.clone()),
+                        _ => None.clone(),
+                    }
+                }).collect::<Vec<_>>();
+                let mut wr = writes.iter().filter_map(|wr| {
+                    match wr {
+                        &Lvalue::Variable{ ref name, .. } => Some(name.clone()),
+                        _ => None.clone(),
+                    }
+                }).collect::<Vec<_>>();
+
+                rd.sort();
+                wr.sort();
+
+                rd.dedup();
+                wr.dedup();
+
+                if rd.len() == reads.len() && wr.len() == writes.len() {
+                    Ok(())
+                } else {
+                    Err("resolved calls can only read/write variables.".into())
+                }
+            }
+
+            &Statement::UnresolvedCall{ .. } => Ok(())
         });
 
         match self {
@@ -607,14 +639,16 @@ impl Statement {
     pub fn assignee(&self) -> Option<&Lvalue> {
         match self {
             &Statement::Simple{ ref assignee,.. } => Some(assignee),
-            &Statement::Call{ .. } => None,
+            &Statement::ResolvedCall{ .. } => None,
+            &Statement::UnresolvedCall{ .. } => None,
         }
     }
 
     pub fn assignee_mut(&mut self) -> Option<&mut Lvalue> {
         match self {
             &mut Statement::Simple{ ref mut assignee,.. } => Some(assignee),
-            &mut Statement::Call{ .. } => None,
+            &mut Statement::ResolvedCall{ .. } => None,
+            &mut Statement::UnresolvedCall{ .. } => None,
         }
     }
 }
@@ -1100,7 +1134,9 @@ impl Display for Statement {
                     Ok(())
                 },
             },
-            &Statement::Call{ ref target,.. } => f.write_fmt(format_args!("call {}",target)),
+            &Statement::UnresolvedCall{ ref target,.. } => f.write_fmt(format_args!("call {}",target)),
+            &Statement::ResolvedCall{ function: CallTarget::Function(ref uuid),.. } => f.write_fmt(format_args!("call {}",uuid)),
+            &Statement::ResolvedCall{ function: CallTarget::Stub(ref name),.. } => f.write_fmt(format_args!("call {}",name)),
         }
     }
 }

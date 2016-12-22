@@ -3371,10 +3371,8 @@ macro_rules! rreil_callop {
     // call noff
     ( $a:tt : $a_w:tt ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!($a : $a_w),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
@@ -3395,10 +3393,8 @@ let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sani
     // call off
     ( $a:tt : $a_w:tt / $a_o:tt ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!($a : $a_w / $a_o),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
@@ -3419,10 +3415,8 @@ let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sani
     // call lit
     ( ( $a:expr ) ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!(( $a )),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
@@ -3443,10 +3437,8 @@ let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sani
     // call litw
     ( ( $a:expr ) : $a_w:tt ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!(( $a ) : $a_w),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
@@ -3467,10 +3459,8 @@ let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sani
     // call noff
     ( $a:tt : $a_w:tt ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!($a : $a_w),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
@@ -3491,10 +3481,8 @@ let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sani
     // call undef
     ( ? ; $($cdr:tt)*) => {
         {
-            let mut stmt = vec![$crate::Statement::Call{
+            let mut stmt = vec![$crate::Statement::UnresolvedCall{
                 target: rreil_rvalue!(?),
-                reads: vec![],
-                writes: vec![],
             }];
 let ret: $crate::result::Result<Vec<$crate::il::Statement>> = match stmt[0].sanity_check() {
 	Ok(()) => {
