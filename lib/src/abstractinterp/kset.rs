@@ -81,7 +81,7 @@ impl Avalue for Kset {
         }
     }
 
-    fn execute(_: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>, _: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
+    fn execute(_: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>, _: &HashMap<Range<u64>,Cow<'static,str>>, _: &HashMap<(Cow<'static,str>,usize),Self>) -> Self {
         fn permute(_a: &Kset, _b: &Kset, f: &Fn(Rvalue,Rvalue) -> Rvalue) -> Kset {
             match (_a,_b) {
                 (&Kset::Join,_) => Kset::Join,

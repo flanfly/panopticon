@@ -65,6 +65,10 @@ fn main() {
     use std::env;
 
     env_logger::init().unwrap();
+    rayon::initialize(
+        rayon::Configuration::new().
+        set_num_threads(1)
+    ).unwrap();
 
     if cfg!(unix) {
         // workaround bug #165

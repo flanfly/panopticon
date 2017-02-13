@@ -481,9 +481,14 @@ pub enum Statement {
         op: Operation<Rvalue>,
     },
     /// Function call
-    Call{
+    ResolvedCall{
+        function: CallTarget,
+        reads: Vec<Rvalue>,
+        writes: Vec<Lvalue>,
+    },
+    UnresolvedCall{
         /// Call target
-        target: FunctionPointer,
+        target: Rvalue,
     },
 }
 
@@ -1118,7 +1123,7 @@ impl Display for Statement {
                 Operation::SignExtend(s,ref a) => f.write_fmt(format_args!("sign-extend_{} {}, {}",s,assignee,a)),
                 Operation::Select(s,ref a,ref b) => f.write_fmt(format_args!("select_{} {}, {}, {}",s,assignee,a,b)),
                 Operation::Move(ref a) => f.write_fmt(format_args!("mov {}, {}",assignee,a)),
-                Operation::Initialize(_,_) => f.write_fmt(format_args!("init {}",assignee)),
+                Operation::Initialize(ref name,ref size) => f.write_fmt(format_args!("init {}, {}:{}",assignee,name,size)),
 
                 Operation::Load(ref r,Endianess::Little,ref sz,ref b) => f.write_fmt(format_args!("load_{}/le/{} {}, {}",r,sz,assignee,b)),
                 Operation::Load(ref r,Endianess::Big,ref sz,ref b) => f.write_fmt(format_args!("load_{}/be/{} {}, {}",r,sz,assignee,b)),
@@ -1135,8 +1140,16 @@ impl Display for Statement {
                 },
             },
             &Statement::UnresolvedCall{ ref target,.. } => f.write_fmt(format_args!("call {}",target)),
-            &Statement::ResolvedCall{ function: CallTarget::Function(ref uuid),.. } => f.write_fmt(format_args!("call {}",uuid)),
-            &Statement::ResolvedCall{ function: CallTarget::Stub(ref name),.. } => f.write_fmt(format_args!("call {}",name)),
+            &Statement::ResolvedCall{ function: CallTarget::Function(ref uuid), ref reads, ref writes } => {
+                let rd = reads.iter().fold("".to_string(),|acc,x| { format!("{} {}",acc,x) });
+                let wr = writes.iter().fold("".to_string(),|acc,x| { format!("{} {}",acc,x) });
+                f.write_fmt(format_args!("call {}, reads: {}, writes: {}",uuid,rd,wr))
+            },
+            &Statement::ResolvedCall{ function: CallTarget::Stub(ref name), ref reads, ref writes } => {
+                let rd = reads.iter().fold("".to_string(),|acc,x| { format!("{} {}",acc,x) });
+                let wr = writes.iter().fold("".to_string(),|acc,x| { format!("{} {}",acc,x) });
+                f.write_fmt(format_args!("call {}, reads: {}, writes: {}",name,rd,wr))
+            },
         }
     }
 }

@@ -45,8 +45,8 @@ struct QueryResult<Q: Query> {
     subqueries: Vec<(CallTarget,Q)>,
 }
 
-trait Query: Send + Sync + Sized + PartialEq + Clone {
-    type Answer: Send + Sync + Sized + PartialEq;
+trait Query: Send + Sync + Sized + PartialEq + Clone + Debug {
+    type Answer: Send + Sync + Sized + PartialEq + Debug;
     fn execute(&self, &Function, &Region, &HashMap<Range<u64>,Cow<'static,str>>,
                &HashMap<CallTarget,Vec<(Self,Self::Answer)>>) -> Result<QueryResult<Self>>;
     fn simulate(&self, &Cow<'static,str>) -> Result<QueryResult<Self>>;
@@ -108,6 +108,11 @@ fn run_query<Q: Query>(entries: &Vec<CallTarget>, query: Q, program: &Program, r
                     let qa_pair = (query.clone(),answer);
                     let fixedpoint = answers.read().get(tgt).and_then(|x| x.iter().find(|x| **x == qa_pair)).is_some();
 
+                    if fixedpoint {
+                        debug!("QR: {:?}",qa_pair);
+                        debug!("QR: saw this question already, stopping");
+                    }
+
                     if fixedpoint || subqueries.is_empty() {
                         *state = QueryState::Done;
                     } else {
@@ -166,6 +171,13 @@ struct DataflowAnswer {
     writes: Vec<Lvalue>,
 }
 
+use std::fmt;
+impl fmt::Debug for DataflowAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "DataflowAnswer{{ reads: {:?}, writes: {:?} }}",self.reads,self.writes)
+    }
+}
+
 impl PartialEq for DataflowAnswer {
     fn eq(&self, rhs: &Self) -> bool { true }
 }
@@ -179,8 +191,13 @@ impl Query for DataflowQuery {
                 answer: DataflowAnswer{
                     function: None,
                     reads: vec![
-                        Rvalue::Variable{ name: "ESP".into(), size: 32, subscript: Some(0), offset: 0 },
                         Rvalue::Variable{ name: "RSP".into(), size: 64, subscript: Some(0), offset: 0 },
+                        Rvalue::Variable{ name: "RDI".into(), size: 64, subscript: Some(0), offset: 0 }, // main
+                        Rvalue::Variable{ name: "RSI".into(), size: 64, subscript: Some(0), offset: 0 }, // argc
+                        Rvalue::Variable{ name: "RDX".into(), size: 64, subscript: Some(0), offset: 0 }, // argv
+                        Rvalue::Variable{ name: "RCX".into(), size: 64, subscript: Some(0), offset: 0 }, // init
+                        Rvalue::Variable{ name: "R8".into(), size: 64, subscript: Some(0), offset: 0 }, // fini
+                        Rvalue::Variable{ name: "R9".into(), size: 64, subscript: Some(0), offset: 0 }, // rtld_fini
                     ],
                     writes: vec![]
                 },
@@ -229,22 +246,37 @@ impl Query for DataflowQuery {
     }
 }
 
+type AbstractInterpEnv = HashMap<(Cow<'static,str>,usize),BoundedAddrTrack>;
+
 #[derive(Debug,PartialEq,Clone)]
 struct AbstractInterpQuery{
-    registers: Arc<HashSet<&'static str>>,
-    env: HashMap<(Cow<'static,str>,usize),BoundedAddrTrack>,
+    env: AbstractInterpEnv,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq,Debug)]
 struct AbstractInterpAnswer {
-    values: HashMap<(Cow<'static,str>,usize),BoundedAddrTrack>,
+    values: HashMap<Lvalue,BoundedAddrTrack>,
+}
+
+impl AbstractInterpQuery {
+    fn is_environment_more_exact(a: &AbstractInterpEnv, b: &AbstractInterpEnv) -> bool {
+        if a.len() < b.len() { return false; }
+        if a.len() > b.len() { return true; }
+        for (k,aval1) in a.iter() {
+            let aval2 = b.get(k).unwrap_or(&BoundedAddrTrack::Meet).clone();
+            if !aval1.more_exact(&aval2) { return false; }
+        }
+        true
+    }
 }
 
 impl Query for AbstractInterpQuery {
     type Answer = AbstractInterpAnswer;
 
     fn simulate(&self, sym: &Cow<'static,str>) -> Result<QueryResult<Self>> {
-        println!("Dflow {}: {:?}",sym,self.env);
+        debug!("AI of {:?} w/ env:",sym);
+        for x in self.env.iter() { debug!("\t{:?}",x); }
+        debug!("\tEOL");
 
         if sym == "__libc_start_main" {
             Ok(QueryResult::<Self>{
@@ -266,23 +298,13 @@ impl Query for AbstractInterpQuery {
 
     fn execute(&self, func: &Function, region: &Region, symbols: &HashMap<Range<u64>,Cow<'static,str>>,
                answers: &HashMap<CallTarget,Vec<(Self,Self::Answer)>>) -> Result<QueryResult<Self>> {
-        debug!("AI of {:?} w/ env {:?}",func.name,self.env);
+        //println!("{}",func.to_dot());
         let values = try!(approximate::<BoundedAddrTrack>(func,Some(region),&symbols,&self.env));
-        let mut subqs = vec![];
-        // XXX: fill from values
-        let mut final_values = HashMap::<(Cow<'static,str>,usize),BoundedAddrTrack>::new();
+        debug!("AI of {:?} w/ env:",func.name);
+        for x in self.env.iter() { debug!("\t{:?}",x); }
+        debug!("\tEOL");
 
-        for (lv,aval) in values.iter() {
-            if let &Lvalue::Variable{ ref name, ref size,.. } = lv {
-                let is_reg = (*self.registers).contains(&**name);
-                //debug!("{}: {}",name,is_reg);
-                if is_reg {
-                    let nam = (name.clone(),*size);
-                    let cur = final_values.get(&nam).unwrap_or(&BoundedAddrTrack::initial()).clone();
-                    final_values.insert(nam,BoundedAddrTrack::combine(&cur,&aval));
-                }
-            }
-        }
+        let mut subqs = vec![];
 
         for vx in func.cflow_graph.vertices() {
             let lb = try!(func.cflow_graph.vertex_label(vx).ok_or("No label"));
@@ -290,13 +312,31 @@ impl Query for AbstractInterpQuery {
                 &ControlFlowTarget::BasicBlock(ref bb) => {
                     bb.execute(|stmt| match stmt {
                         &Statement::ResolvedCall{ ref function, ref reads, ref writes } => {
-                            debug!("subquery to {:?}",function);
-                            let answer = answers.get(function);
+                            let current_env = AbstractInterpEnv::from_iter(reads.iter().filter_map(|x| {
+                                if let &Rvalue::Variable{ ref name, ref size,.. } = x {
+                                    let lv = Lvalue::from_rvalue(x.clone()).unwrap();
+                                    values.get(&lv).map(|y| ((name.clone(),*size),y.clone()))
+                                } else {
+                                    None
+                                }
+                            }));
+                            // XXX: do a subq if the current (in values) values for reads are more
+                            // exact than those of all prev queries
+                            let start_subquery = answers.get(function).map(|qa_pairs| {
+                                qa_pairs.iter()
+                                        .all(|&(ref q,_)| {
+                                            let ret = Self::is_environment_more_exact(&current_env,&q.env);
+                                            if !ret { debug!("{:?} is eq of more exact then {:?}",q.env,current_env); }
+                                            ret })
+                            }).unwrap_or(true);
 
-                            if answer.is_none() {
+                            debug!("possible AI subquery from {} to {:?} with env:",func.name,function);
+                            for x in current_env.iter() { debug!("\t{:?}",x); }
+
+                            if start_subquery {
+                                debug!("\tRUN");
                                 let subq = AbstractInterpQuery{
-                                    registers: self.registers.clone(),
-                                    env: HashMap::from_iter(reads.iter().filter_map(|rv| {
+                                    env: current_env/*HashMap::from_iter(reads.iter().filter_map(|rv| {
                                         match rv {
                                             &Rvalue::Variable{ ref name, ref size, ref subscript, ref offset } => {
                                                 let lv = Lvalue::Variable{ name: name.clone(), size: *size, subscript: *subscript };
@@ -307,9 +347,11 @@ impl Query for AbstractInterpQuery {
                                             }
                                             _ => { None }
                                         }
-                                    })),
+                                    }))*/,
                                 };
-                                subqs.push((function.clone(),subq.clone()));
+                                subqs.push((function.clone(),subq));
+                            } else {
+                                debug!("\tABORT");
                             }
                         }
                         _ => {}
@@ -321,7 +363,7 @@ impl Query for AbstractInterpQuery {
 
         Ok(QueryResult{
             answer: AbstractInterpAnswer{
-                values: final_values,
+                values: values,
             },
             subqueries: subqs,
         })
@@ -336,19 +378,24 @@ enum CallAddress {
 pub fn run_disassembler(mut functions: Vec<CallTarget>, program: &mut Program, region: &Region,
                         symbols: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<bool> {
     let mut fixedpoint = false;
-    let mut environments = HashMap::<(Cow<'static,str>,usize),BoundedAddrTrack>::new();
+    let mut initial_env = HashMap::<(Cow<'static,str>,usize),BoundedAddrTrack>::from_iter(vec![
+        //(("RDX".into(),64),BoundedAddrTrack::Offset{ region: Some(("atexit".into(),0)), offset: 0, offset_size: 64 }),
+    ].into_iter());
+
     let entries = functions.clone();
+    let registers = HashSet::<&'static str>::from_iter(try!(amd64::Amd64::registers(&amd64::Mode::Long)).iter().map(|x| *x));
 
     while !fixedpoint {
+        // disassemble and find new functions
         let map_reduce_res: Result<(bool,Vec<(CallTarget,CallAddress)>)> = functions.par_iter().map(
             |ct| -> Result<(bool,Vec<(CallTarget,CallAddress)>)> {
                 match ct {
                     &CallTarget::Function(ref uuid) => {
-                        println!("disass {}",uuid);
                         let fref: FunctionRef = try!(program.functions.get(uuid)
                                                      .ok_or::<Cow<'static,str>>("unknown function".into())).clone();
                         {
                             let mut func = fref.0.write();
+                            println!("Try to disassemble more of {}",func.name);
                             disassemble(&mut *func,region)
                         }.map(|(a,b)| {
                             (a,b.into_iter()
@@ -377,6 +424,7 @@ pub fn run_disassembler(mut functions: Vec<CallTarget>, program: &mut Program, r
 
         fixedpoint = !redo_analysis;
 
+        // insert new calls into call graph and resolve call statements
         for (from_ct,to_addr) in calls.into_iter() {
             match from_ct {
                 CallTarget::Function(ref from_uuid) => {
@@ -386,7 +434,7 @@ pub fn run_disassembler(mut functions: Vec<CallTarget>, program: &mut Program, r
                             let (_,maybe_new_function) = try!(insert_call_address(&from_ref,*to_addr,program));
                             if let Some(new_function) = maybe_new_function {
                                 let uuid = new_function.0.read().uuid;
-                                println!("new function {}",uuid);
+                                println!("new function {} ({})",new_function.0.read().name,uuid);
                                 new_functions.push(CallTarget::Function(uuid));
                             }
                         }
@@ -406,113 +454,75 @@ pub fn run_disassembler(mut functions: Vec<CallTarget>, program: &mut Program, r
         fixedpoint &= new_functions.is_empty();
         functions.append(&mut new_functions);
 
-        let mut new_dflow = try!(run_query(&functions, DataflowQuery{}, program, region, symbols));
+        let mut dflow_fixpnt = false;
+        while !dflow_fixpnt {
+            let mut new_dflow = try!(run_query(&functions, DataflowQuery{}, program, region, symbols));
+            let mut var_access = HashMap::<CallTarget,(Vec<Rvalue>,Vec<Lvalue>)>::new();
 
-        for (ct,mut qa_pairs) in new_dflow.drain() {
-            if let CallTarget::Function(ref uuid) = ct {
-                if !qa_pairs.is_empty() {
-                    if let (_,DataflowAnswer{ function: Some(function),.. }) = qa_pairs.swap_remove(0) {
-                        if let Some(&(ref func_ref,_)) = program.functions.get(uuid) {
-                            *func_ref.write() = function;
-                            println!("update {}",uuid);
-                        }
+            dflow_fixpnt = true;
+
+            // update SSA variable subscripts
+            // XXX: parallelize
+            for (ct,qa_pairs) in new_dflow.iter_mut() {
+                let (_,DataflowAnswer{ function: maybe_function, reads, writes }) = qa_pairs.swap_remove(0);
+                var_access.insert(ct.clone(),(reads,writes));
+                if let Some(function) = maybe_function {
+                    if let Some(&(ref func_ref,_)) = program.functions.get(&function.uuid) {
+                        println!("update SSA vars of {}",function.name);
+                        *func_ref.write() = function;
                     }
                 }
             }
-        }
 
-        let ai_query = AbstractInterpQuery{
-            env: environments.clone(),
-            registers: Arc::new(HashSet::from_iter(try!(amd64::Amd64::registers(&amd64::Mode::Long)).iter().map(|x| *x)))
-        };
-        let new_ainterp = try!(run_query(&functions, ai_query, program, region, symbols));
-
-        // Resolve symbolic jumps/calls
-        for (ref ct,ref qa_pairs) in new_ainterp {
-            if let &CallTarget::Function(ref uuid) = ct {
-                let func_ref = try!(program.functions.get(uuid).ok_or::<Cow<'static,str>>("unknown function".into())).clone();
-                let func = &mut *func_ref.0.write();
-                if let Some(&(_,ref a)) = qa_pairs.last() {
-                    let vals = &a.values;
-                    let vxs = { func.cflow_graph.vertices().collect::<Vec<_>>() };
-
-                    //println!("vals: {:?}",vals);
-
-                    for &vx in vxs.iter() {
-                        let new_lb = {
-                            let maybe_lb = func.cflow_graph.vertex_label(vx);
-                            if let Some(&ControlFlowTarget::Value(Rvalue::Variable{ ref name, ref size,..})) = maybe_lb {
-                                println!("{:?}",name);
-
-                                let aval = vals.get(&(name.clone(),*size));
-                                if let Some(&BoundedAddrTrack::Offset{ ref region, ref offset, ref offset_size }) = aval {
-                                    println!("{:?}",aval);
-                                    if region.is_none() {
-                                        debug!("resolved {:?} to {:?}",name,*offset);
-                                        fixedpoint = false;
-                                        Some(ControlFlowTarget::Value(Rvalue::Constant{ value: *offset, size: *offset_size }))
-                                            //fixpoint = true;
-                                            //resolved_jumps.insert(*offset);
-                                    } else if *offset == 0 {
-                                        let maybe_prev_bb = func.cflow_graph.in_edges(vx).next()
-                                            .map(|e| func.cflow_graph.source(e))
-                                            .and_then(|vx| func.cflow_graph.vertex_label(vx))
-                                            .and_then(|lb| if let &ControlFlowTarget::BasicBlock(ref bb) = lb { Some(bb.area.start) } else { None });
-                                        if let Some(prev_bb) = maybe_prev_bb {
-                                            let bb = BasicBlock::from_vec(vec![
-                                                                          try!(Mnemonic::new(prev_bb..prev_bb,"__internal_stub_call".to_string(),"".to_string(),vec![].iter(),vec![
-                                                                                             Statement::ResolvedCall{
-                                                                                                 function: CallTarget::Stub(region.clone().unwrap().0.into()),
-                                                                                                 reads: vec![],
-                                                                                                 writes: vec![],
-                                                                                             }].iter()))]);
-                                            debug!("resolved {:?} to symbolic value {:?}",name,region);
-                                            let _ = try!(insert_call_stub(&func_ref,region.clone().unwrap().0,program));
-                                            functions.push(CallTarget::Stub(region.clone().unwrap().0));
-                                            fixedpoint = false;
-                                            Some(ControlFlowTarget::BasicBlock(bb))
-                                        } else {
-                                            warn!("No previous basic block");
-                                            None
-                                        }
-                                    } else {
-                                        warn!("Can't be resolved");
-                                        None
-                                    }
-                                } else {
-                                    warn!("No abstract value known for {}",name);
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-
-                        if let (Some(mut have),Some(mut new)) = (func.cflow_graph.vertex_label_mut(vx),new_lb) {
-                            *have = new
-                        }
-                    }
-                }
-            }
-        }
-
-        /*
-        new_dflow.par_iter().for_each(|(uuid,ref qa_pairs)| {
-            if let Some(&(ref reads,ref writes)) = qa_pairs.first() {
+            // update reads/writes sets
+            // XXX: parallelize
+            for ct in var_access.keys() {
+                if let &CallTarget::Function(ref uuid) = ct {
                 if let Some((fref,_)) = program.find_function_by_uuid(uuid) {
                     let mut func = &mut *fref.write();
+                    let name = func.name.clone();
                     let vxs = { func.cflow_graph.vertices().collect::<Vec<_>>() };
+
+                    debug!("update rd/wr for calls from {:?}",name);
 
                     for vx in vxs {
                         if let Some(&mut ControlFlowTarget::BasicBlock(ref mut bb)) = func.cflow_graph.vertex_label_mut(vx) {
                             bb.rewrite(|stmt| {
                                 match stmt {
-                                    &mut Statement::Call{ target: Rvalue::Constant{ ref value,.. }, ref mut reads, ref mut writes } => {
-                                        if let Some(target_func) = program.find_function_by_entry(*value) {
-                                            let qa_pair = new_dflow.get(&target_func.0.read().uuid).and_then(|x| x.first());
-                                            if let Some(&(_,DataflowAnswer{ reads: ref target_rd, writes: ref target_wr,.. })) = qa_pair {
-                                                *reads = target_rd.clone();
-                                                *writes = target_wr.clone();
+                                    &mut Statement::ResolvedCall{ function: ref other_function, ref mut reads, ref mut writes } => {
+                                        if let Some(&(ref target_rd,ref target_wr)) = var_access.get(other_function) {
+                                            for r in target_rd.iter() {
+                                                if let &Rvalue::Variable{ ref name, ref size,.. } = r {
+                                                    let new_rv = registers.contains(&**name) && reads.iter().find(|rv| {
+                                                        if let &&Rvalue::Variable{ name: ref other_name, size: ref other_size,.. } = rv {
+                                                            *other_name == *name && *other_size == *size
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }).is_none();
+
+                                                    if new_rv {
+                                                        reads.push(r.clone());
+                                                        dflow_fixpnt = false;
+                                                    }
+                                                }
+                                            }
+
+                                            for w in target_wr.iter() {
+                                                if let &Lvalue::Variable{ ref name, ref size,.. } = w {
+                                                    let new_lv = registers.contains(&**name) && writes.iter().find(|lv| {
+                                                        if let &&Lvalue::Variable{ name: ref other_name, size: ref other_size,.. } = lv {
+                                                            *other_name == *name && *other_size == *size
+                                                        } else {
+                                                            false
+                                                        }
+                                                    }).is_none();
+
+                                                    if new_lv {
+                                                        writes.push(w.clone());
+                                                        dflow_fixpnt = false;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -523,7 +533,107 @@ pub fn run_disassembler(mut functions: Vec<CallTarget>, program: &mut Program, r
                     }
                 }
             }
-        });*/
+        }
+        }
+
+        let ai_query = AbstractInterpQuery{
+            env: initial_env.clone(),
+        };
+        let new_ainterp = try!(run_query(&functions, ai_query, program, region, symbols));
+
+        // resolve symbolic jumps/calls
+        // XXX: parallelize
+        for (ref ct,ref qa_pairs) in new_ainterp {
+            match ct {
+                &CallTarget::Function(ref uuid) => {
+                    let func_ref = try!(program.functions.get(uuid).ok_or::<Cow<'static,str>>("unknown function".into())).clone();
+                    let func = &mut *func_ref.0.write();
+                    if let Some(&(_,ref a)) = qa_pairs.last() {
+                        let vals = &a.values;
+                        let vxs = { func.cflow_graph.vertices().collect::<Vec<_>>() };
+
+                        //println!("vals: {:?}",vals);
+
+                        for &vx in vxs.iter() {
+                            let new_lb = {
+                                let maybe_lb = func.cflow_graph.vertex_label(vx);
+                                if let Some(&ControlFlowTarget::Value(Rvalue::Variable{ ref name, ref size, ref subscript, offset: 0 })) = maybe_lb {
+                                    println!("{:?}",name);
+
+                                    let aval = vals.get(&Lvalue::Variable{ name: name.clone(), size: *size, subscript: *subscript });
+                                    if let Some(&BoundedAddrTrack::Offset{ ref region, ref offset, ref offset_size }) = aval {
+                                        println!("{:?}",aval);
+                                        if region.is_none() {
+                                            debug!("resolved {:?} to {:?}",name,*offset);
+                                            fixedpoint = false;
+                                            Some(ControlFlowTarget::Value(Rvalue::Constant{ value: *offset, size: *offset_size }))
+                                                //fixpoint = true;
+                                                //resolved_jumps.insert(*offset);
+                                        } else if *offset == 0 {
+                                            let maybe_prev_bb = func.cflow_graph.in_edges(vx).next()
+                                                .map(|e| func.cflow_graph.source(e))
+                                                .and_then(|vx| func.cflow_graph.vertex_label(vx))
+                                                .and_then(|lb| if let &ControlFlowTarget::BasicBlock(ref bb) = lb { Some(bb.area.start) } else { None });
+                                            if let Some(prev_bb) = maybe_prev_bb {
+                                                let bb = BasicBlock::from_vec(vec![
+                                                                              try!(Mnemonic::new(prev_bb..prev_bb,"__internal_stub_call".to_string(),"".to_string(),vec![].iter(),vec![
+                                                                                                 Statement::ResolvedCall{
+                                                                                                     function: CallTarget::Stub(region.clone().unwrap().0.into()),
+                                                                                                     reads: vec![],
+                                                                                                     writes: vec![],
+                                                                                                 }].iter()))]);
+                                                debug!("resolved {:?} to symbolic value {:?}",name,region);
+                                                let _ = try!(insert_call_stub(&func_ref,region.clone().unwrap().0,program));
+                                                functions.push(CallTarget::Stub(region.clone().unwrap().0));
+                                                fixedpoint = false;
+                                                Some(ControlFlowTarget::BasicBlock(bb))
+                                            } else {
+                                                warn!("No previous basic block");
+                                                None
+                                            }
+                                        } else {
+                                            warn!("Can't be resolved");
+                                            None
+                                        }
+                                    } else {
+                                        warn!("No abstract value known for {}",name);
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            };
+
+                            if let (Some(mut have),Some(mut new)) = (func.cflow_graph.vertex_label_mut(vx),new_lb) {
+                                *have = new
+                            }
+                        }
+                    }
+                }
+                &CallTarget::Stub(ref name) if *name == "__libc_start_main" => {
+                    if let Some(&(ref func_ref,ref a)) = qa_pairs.last() {
+                        let vals = &a.values;
+                        let maybe_main = vals.get(&Lvalue::Variable{ name: "RDI".into(), size: 64, subscript: None });
+                        if let Some(&BoundedAddrTrack::Offset{ region: None, ref offset, ref offset_size }) = maybe_main {
+                            debug!("resolved main to {:?}",offset);
+                            let has_main = prog.fin
+                            let mut to_func = Function::new(format!("func_{:x}",to_address),from_func.region.clone());
+                            let to_uuid = to_func.uuid.clone();
+                            let to_ent = to_func.cflow_graph.add_vertex(ControlFlowTarget::Value(Rvalue::Constant{ value: to_address, size: 64 }));
+                            let to_vx = prog.call_graph.add_vertex(CallTarget::Function(to_uuid.clone()));
+
+                            to_func.entry_point = Some(to_ent);
+
+                            let to_ref = (Arc::new(RwLock::new(to_func)),to_vx);
+
+                            prog.functions.insert(to_uuid,to_ref.clone());
+                            prog.call_graph.add_edge((),func_ref.1,to_ref.1);
+                            fixedpoint &= !changed;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(true)
@@ -561,25 +671,34 @@ fn insert_call_address(func_ref: &FunctionRef, to_address: u64, prog: &mut Progr
             Ok((false,None))
         } else {
             prog.call_graph.add_edge((),func_ref.1,to_ref.1);
-
+            let mut from_func = &mut *func_ref.0.write();
+            from_func.resolve_calls(to_address,&to_ref.0.read().uuid);
             Ok((true,None))
         }
     } else {
         use std::sync::Arc;
         use parking_lot::RwLock;
 
-        let from_func = &*func_ref.0.read();
-        let mut to_func = Function::new(format!("func_{:x}",to_address),from_func.region.clone());
-        let to_uuid = to_func.uuid.clone();
-        let to_ent = to_func.cflow_graph.add_vertex(ControlFlowTarget::Value(Rvalue::Constant{ value: to_address, size: 64 }));
-        let to_vx = prog.call_graph.add_vertex(CallTarget::Function(to_uuid.clone()));
+        let to_ref = {
+            let from_func = &*func_ref.0.read();
+            let mut to_func = Function::new(format!("func_{:x}",to_address),from_func.region.clone());
+            let to_uuid = to_func.uuid.clone();
+            let to_ent = to_func.cflow_graph.add_vertex(ControlFlowTarget::Value(Rvalue::Constant{ value: to_address, size: 64 }));
+            let to_vx = prog.call_graph.add_vertex(CallTarget::Function(to_uuid.clone()));
 
-        to_func.entry_point = Some(to_ent);
+            to_func.entry_point = Some(to_ent);
 
-        let to_ref = (Arc::new(RwLock::new(to_func)),to_vx);
+            let to_ref = (Arc::new(RwLock::new(to_func)),to_vx);
 
-        prog.functions.insert(to_uuid,to_ref.clone());
-        prog.call_graph.add_edge((),func_ref.1,to_ref.1);
+            prog.functions.insert(to_uuid,to_ref.clone());
+            prog.call_graph.add_edge((),func_ref.1,to_ref.1);
+            to_ref
+        };
+
+        {
+            let mut from_func = &mut *func_ref.0.write();
+            from_func.resolve_calls(to_address,&to_ref.0.read().uuid);
+        }
 
         Ok((true,Some(to_ref)))
     }
@@ -866,7 +985,7 @@ fn disassemble(func: &mut Function, region: &Region) -> Result<(bool,Vec<CallAdd
         }
 
         if let Some(entry) = maybe_addr {
-            println!("request to diassemble {}",entry);
+            println!("continue disassembling {} at 0x{:x}",func.name,entry);
             ret = true;
             try!(Function::disassemble::<amd64::Amd64>(func,amd64::Mode::Long,entry,&region));
         } else {

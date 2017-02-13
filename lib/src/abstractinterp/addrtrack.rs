@@ -86,7 +86,8 @@ impl Avalue for BoundedAddrTrack {
         }
     }
 
-    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>, symbolic: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
+    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>,
+               symbolic: &HashMap<Range<u64>,Cow<'static,str>>, initial: &HashMap<(Cow<'static,str>,usize),Self>) -> Self {
         fn execute(op: Operation<Rvalue>) -> BoundedAddrTrack {
             let tmp = il::execute(op);
             if let Rvalue::Constant{ ref value, ref size } = tmp {
@@ -297,6 +298,9 @@ impl Avalue for BoundedAddrTrack {
                     _ => ops.iter().fold(BoundedAddrTrack::Meet,|acc,x| acc.combine(&x))
                 }
             }
+
+            Operation::Initialize(ref name, ref size) =>
+                initial.get(&(name.clone(),*size)).unwrap_or(&BoundedAddrTrack::Meet).clone(),
 
             _ => BoundedAddrTrack::Join,
         }

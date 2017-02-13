@@ -532,20 +532,28 @@ impl Function {
         format!("{}\n}}",ret)
     }
 
-    pub fn resolve_function(&mut self, entry: u64, func: &FunctionRef) {
-   let mut ret = Vec::new();
-        for vx in self.cflow_graph.vertices() {
+    pub fn resolve_calls(&mut self, entry: u64, func: &Uuid) -> bool {
+        let mut ret = false;
+        let vxs = self.cflow_graph.vertices().collect::<Vec<_>>();
+
+        for vx in vxs {
             if let Some(&mut ControlFlowTarget::BasicBlock(ref mut bb)) = self.cflow_graph.vertex_label_mut(vx) {
-                bb.rewrite(|i| match i {
-                    &mut Statement::UnresolvedCall{ target: Rvaluefunction: ref ct, ..} => ret.push(ct.clone()),
-                    _ => {}
+                bb.rewrite(|i| {
+                    let do_replace = if let &mut Statement::UnresolvedCall{ target: Rvalue::Constant{ value: entry,.. } } = i { true } else { false };
+                    if do_replace {
+                        ret = true;
+                        *i = Statement::ResolvedCall{
+                            function: CallTarget::Function(func.clone()),
+                            reads: vec![],
+                            writes: vec![],
+                        };
+                    }
                 });
             }
         }
 
         ret
     }
-
 }
 
 #[cfg(test)]

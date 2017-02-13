@@ -96,7 +96,7 @@ pub trait Avalue: Clone + PartialEq + Eq + Hash + Debug + Encodable + Decodable 
     /// the constraint the best.
     fn abstract_constraint(&Constraint) -> Self;
     /// Execute the abstract version of the operation, yielding the result.
-    fn execute(&ProgramPoint,&Operation<Self>,Option<&Region>,&HashMap<Range<u64>,Cow<'static,str>>) -> Self;
+    fn execute(&ProgramPoint,&Operation<Self>,Option<&Region>,&HashMap<Range<u64>,Cow<'static,str>>,&HashMap<(Cow<'static,str>,usize),Self>) -> Self;
     /// Narrows `self` with the argument.
     fn narrow(&self,&Self) -> Self;
     /// Widens `self` with the argument.
@@ -126,13 +126,14 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
     fn stabilize<A: Avalue>(h: &Vec<Box<HierarchicalOrdering<ControlFlowRef>>>, graph: &ControlFlowGraph,
                             constr: &HashMap<Lvalue,A>, sizes: &HashMap<Cow<'static,str>,usize>,
                             ret: &mut HashMap<(Cow<'static,str>,usize),A>,reg: Option<&Region>,
-                            sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<()> {
+                            sym: &HashMap<Range<u64>,Cow<'static,str>>,
+                            env: &HashMap<(Cow<'static,str>,usize),A>) -> Result<()> {
         let mut stable = true;
         let mut iter_cnt = 0;
         let head = if let Some(h) = h.first() {
             match &**h {
                 &HierarchicalOrdering::Element(ref vx) => vx.clone(),
-                &HierarchicalOrdering::Component(ref vec) => return stabilize(vec,graph,constr,sizes,ret,reg,sym),
+                &HierarchicalOrdering::Component(ref vec) => return stabilize(vec,graph,constr,sizes,ret,reg,sym,env),
             }
         } else {
             return Ok(())
@@ -142,9 +143,9 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
             for x in h.iter() {
                 match &**x {
                     &HierarchicalOrdering::Element(ref vx) =>
-                        stable &= !try!(execute(*vx,iter_cnt >= 2 && *vx == head,graph,constr,sizes,ret,reg,sym)),
+                        stable &= !try!(execute(*vx,iter_cnt >= 2 && *vx == head,graph,constr,sizes,ret,reg,sym,env)),
                     &HierarchicalOrdering::Component(ref vec) => {
-                        try!(stabilize(&*vec,graph,constr,sizes,ret,reg,sym));
+                        try!(stabilize(&*vec,graph,constr,sizes,ret,reg,sym,env));
                         stable = true;
                     },
                 }
@@ -171,7 +172,8 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
     fn execute<A: Avalue>(t: ControlFlowRef, do_widen: bool, graph: &ControlFlowGraph,
                           _: &HashMap<Lvalue,A>, sizes: &HashMap<Cow<'static,str>,usize>,
                           ret: &mut HashMap<(Cow<'static,str>,usize),A>, reg: Option<&Region>,
-                          sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Result<bool> {
+                          sym: &HashMap<Range<u64>,Cow<'static,str>>,
+                          env: &HashMap<(Cow<'static,str>,usize),A>) -> Result<bool> {
         if let Some(&ControlFlowTarget::BasicBlock(ref bb)) = graph.vertex_label(t) {
             let mut change = false;
             let mut pos = 0usize;
@@ -179,7 +181,7 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
                 let mut exec_single_rreil_instr = |op: &Operation<Rvalue>, assignee: &Lvalue| {
                     if let Lvalue::Variable{ ref name, subscript: Some(ref subscript),.. } = *assignee {
                         let pp = ProgramPoint{ address: bb.area.start, position: pos };
-                        let new = A::execute(&pp,&lift(op,&|x| res::<A>(x,sizes,&ret)),reg,sym);
+                        let new = A::execute(&pp,&lift(op,&|x| res::<A>(x,sizes,&ret)),reg,sym,env);
                         let assignee = (name.clone(),*subscript);
                         let cur = ret.get(&assignee).cloned();
 
@@ -308,10 +310,10 @@ pub fn approximate<A: Avalue>(func: &Function,reg: Option<&Region>,
 
     match wto {
         HierarchicalOrdering::Component(ref v) => {
-            try!(stabilize(v,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym));
+            try!(stabilize(v,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym,env));
         },
         HierarchicalOrdering::Element(ref v) => {
-            try!(execute(*v,false,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym));
+            try!(execute(*v,false,&func.cflow_graph,&constr,&sizes,&mut ret,reg,sym,env));
         },
     }
 
@@ -435,7 +437,7 @@ impl<A: Avalue> Avalue for Widening<A> {
         }
     }
 
-    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>,sym: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
+    fn execute(pp: &ProgramPoint, op: &Operation<Self>, reg: Option<&Region>,sym: &HashMap<Range<u64>,Cow<'static,str>>, env: &HashMap<(Cow<'static,str>,usize),Self>) -> Self {
         match op {
             &Operation::Phi(ref ops) => {
                 let widen = ops.iter().map(|x| x.point.clone().unwrap_or(pp.clone())).max() > Some(pp.clone());
@@ -456,7 +458,7 @@ impl<A: Avalue> Avalue for Widening<A> {
                 }
             },
             _ => Widening{
-                value: A::execute(pp,&lift(op,&|x| x.value.clone()),reg,sym),
+                value: A::execute(pp,&lift(op,&|x| x.value.clone()),reg,sym,&HashMap::new()),
                 point: Some(pp.clone()),
             }
         }
@@ -552,7 +554,7 @@ mod tests {
             }
         }
 
-        fn execute(_: &ProgramPoint, op: &Operation<Self>, _: Option<&Region>,_: &HashMap<Range<u64>,Cow<'static,str>>) -> Self {
+        fn execute(_: &ProgramPoint, op: &Operation<Self>, _: Option<&Region>,_: &HashMap<Range<u64>,Cow<'static,str>>, _: &HashMap<(Cow<'static,str>,usize),A>) -> Self {
             match op {
                 &Operation::Add(Sign::Positive,Sign::Positive) => Sign::Positive,
                 &Operation::Add(Sign::Positive,Sign::Zero) => Sign::Positive,
