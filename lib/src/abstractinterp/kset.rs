@@ -33,7 +33,7 @@ use {
 };
 
 /// Largest Kset cardinality before Join.
-const KSET_MAXIMAL_CARDINALITY: usize = 10;
+pub const KSET_MAXIMAL_CARDINALITY: usize = 10;
 
 /// Kindler et.al style Kset domain. Domain elements are sets of concrete values. Sets have a
 /// maximum cardinality. Every set larger than that is equal the lattice join. The partial order is
@@ -89,11 +89,15 @@ impl Avalue for Kset {
                         let x = Rvalue::Constant{ value: _x, size: _xs };
                         for &(_y,_ys) in b.iter() {
                             let y = Rvalue::Constant{ value: _y, size: _ys };
-                            if let Rvalue::Constant{ value, size } = f(x.clone(),y) {
-                                ret.insert((value,size));
-                                if ret.len() > KSET_MAXIMAL_CARDINALITY {
-                                    return Kset::Join;
+                            match f(x.clone(),y) {
+                                Rvalue::Constant{ value, size } => {
+                                    ret.insert((value,size));
+                                    if ret.len() > KSET_MAXIMAL_CARDINALITY {
+                                        return Kset::Join;
+                                    }
                                 }
+                                Rvalue::Undefined => return Kset::Join,
+                                _ => {}
                             }
                         }
                     }
@@ -111,14 +115,15 @@ impl Avalue for Kset {
         };
         fn map(_a: &Kset, f: &Fn(Rvalue) -> Rvalue) -> Kset {
             if let &Kset::Set(ref a) = _a {
-                let mut s = HashSet::<(u64,usize)>::from_iter(
-                    a.iter().filter_map(|&(a,_as)| {
-                        if let Rvalue::Constant{ value, size } = f(Rvalue::Constant{ value: a, size: _as }) {
-                            Some((value,size))
-                        } else {
-                            None
-                        }
-                    }));
+                let mut s = HashSet::<(u64,usize)>::new();
+
+                for &(a,_as) in a.iter() {
+                    match f(Rvalue::Constant{ value: a, size: _as }) {
+                        Rvalue::Constant{ value, size } => { s.insert((value,size)); }
+                        Rvalue::Undefined => return Kset::Join,
+                        _ => {}
+                    }
+                }
 
                 if s.len() > KSET_MAXIMAL_CARDINALITY {
                     Kset::Join
@@ -148,7 +153,11 @@ impl Avalue for Kset {
             Operation::Multiply(ref a,ref b) =>
                 permute(a,b,&|a,b| execute(Operation::Multiply(a,b))),
             Operation::DivideSigned(ref a,ref b) =>
-                permute(a,b,&|a,b| execute(Operation::DivideSigned(a,b))),
+                permute(a,b,&|a,b| {
+                    let x = execute(Operation::DivideSigned(a.clone(),b.clone()));
+                    println!("{:?} / {:?} = {:?}",a,b,x);
+                    x
+                }),
             Operation::DivideUnsigned(ref a,ref b) =>
                 permute(a,b,&|a,b| execute(Operation::DivideUnsigned(a,b))),
             Operation::Modulo(ref a,ref b) =>

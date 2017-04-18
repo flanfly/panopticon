@@ -97,6 +97,9 @@ extern crate goblin;
 #[macro_use]
 extern crate quickcheck;
 
+#[cfg(test)]
+extern crate env_logger;
+
 // core
 pub mod disassembler;
 pub use disassembler::{
@@ -180,7 +183,11 @@ pub use abstractinterp::{
     results,
 };
 pub use abstractinterp::bounded_addr_track::BoundedAddrTrack;
-pub use abstractinterp::kset::Kset;
+pub use abstractinterp::kset::{
+    Kset,
+    KSET_MAXIMAL_CARDINALITY
+};
+pub use abstractinterp::circular_linear_prog::Clp;
 
 pub mod pipeline;
 pub use pipeline::pipeline;

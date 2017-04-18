@@ -742,12 +742,11 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::ShiftLeft(_,_) =>
             Rvalue::Undefined,
 
-        Operation::ShiftRightUnsigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
+        Operation::ShiftRightUnsigned(Rvalue::Constant{ value: a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
             use std::cmp;
             debug_assert!(s == _s);
 
-            let a = (_a);
-            let mask = (if s < 64 { (1u64 << s) - 1 } else { u64::MAX });
+            let mask = if s < 64 { (1u64 << s) - 1 } else { u64::MAX };
             Rvalue::Constant{ value: ((a >> cmp::min(s,(b as usize))) & mask), size: s }
         },
         Operation::ShiftRightUnsigned(Rvalue::Constant{ value: 0, size: s },_) =>
@@ -758,7 +757,6 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
             Rvalue::Undefined,
 
         Operation::ShiftRightSigned(Rvalue::Constant{ value: _a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
-            use std::cmp;
             debug_assert!(s == _s);
 
             let mut a = Wrapping(_a as i64);
@@ -883,11 +881,11 @@ pub fn execute(op: Operation<Rvalue>) -> Rvalue {
         Operation::LessOrEqualSigned(_,_) =>
             Rvalue::Undefined,
 
-        Operation::LessUnsigned(Rvalue::Constant{ value: a, size: s },Rvalue::Constant{ value: b, size: _s }) => {
-            debug_assert!(s == _s);
+        Operation::LessUnsigned(Rvalue::Constant{ value: a_, size: sa },Rvalue::Constant{ value: b_, size: sb }) => {
+            debug_assert!(sb == sa);
 
-            let a = if s < 64 { Wrapping(_a & ((1 << s) - 1)) } else { Wrapping(_a) };
-            let b = if s < 64 { Wrapping(_b & ((1 << s) - 1)) } else { Wrapping(_b) };
+            let a = if sa < 64 { Wrapping(a_ & ((1 << sa) - 1)) } else { Wrapping(a_) };
+            let b = if sb < 64 { Wrapping(b_ & ((1 << sa) - 1)) } else { Wrapping(b_) };
 
             if a < b {
                 Rvalue::Constant{ value: 1, size: 1 }

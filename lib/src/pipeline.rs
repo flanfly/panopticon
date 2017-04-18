@@ -24,14 +24,13 @@ use std::fmt::Debug;
 pub fn pipeline<A: Architecture + Debug + 'static >(program: Program, region: Region, config: A::Configuration) -> Box<Stream<Item=Function,Error=()> + Send>
 where A::Configuration: Debug {
     let (tx,rx) = mpsc::channel::<Function>(10);
-    let name = region.name().clone();
     thread::spawn(move || {
         let mut tx = tx;
         let mut functions = HashMap::<u64,Function>::new();
         let mut targets = HashSet::<u64>::from_iter(program.call_graph.vertices().filter_map(|vx| {
             match program.call_graph.vertex_label(vx) {
-                Some(&CallTarget::Todo(Rvalue::Constant{ value: ref entry,.. },ref maybe_name,ref uuid)) => Some(*entry),
-                Some(a) => None,
+                Some(&CallTarget::Todo(Rvalue::Constant{ value: ref entry,.. },_,_)) => Some(*entry),
+                Some(_) => None,
                 None => unreachable!(),
             }
         }));
