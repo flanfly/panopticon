@@ -471,6 +471,82 @@ pub fn flag_operations(func: &Function) -> HashMap<ControlFlowEdge,Operation<Rva
     ret
 }
 
+/// Creates a static backward program slice for function `func` and splicing criteria `crit`.
+/// # Note
+/// The function is recursive and may overflow the stack when run on large input functions.
+pub fn backward_slice(func: &Function, crit: &(Cow<'static,str>,usize)) -> Result<Vec<(Cow<'static,str>,usize)>> {
+    let postorder = func.postorder();
+
+    for vx in postorder {
+        match func.cflow_graph.vertex_label(vx) {
+            Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                for mne in bb.mnemonics.iter() {
+                    for stmt in mne.instructions.iter() {
+                        if let Lvalue::Variable{ ref name, ref subscript,.. } = stmt.assignee {
+                            if *name == crit.0 && *subscript == Some(crit.1) {
+                                return stmt.op.operands().iter().map(|rv| {
+                                    if let &&Rvalue::Variable{ ref name, subscript: Some(subscript),.. } = rv {
+                                        backward_slice(func,&(name.clone(),subscript))
+                                    } else {
+                                        Ok(vec![])
+                                    }
+                                }).fold(Ok(vec![crit.clone()]),|acc,res| {
+                                    match (acc,res) {
+                                        (acc@Err(_),_) => acc,
+                                        (Ok(_),res@Err(_)) => res,
+                                        (Ok(mut acc),Ok(mut res)) => Ok(acc.drain(..).chain(res.drain(..)).collect()),
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Some(&ControlFlowTarget::Unresolved(_)) | Some(&ControlFlowTarget::Failed(_,_)) | None => {}
+        }
+    }
+
+    Ok(vec![])
+}
+
+/// Creates a static forward program slice for function `func` and slicing criteria `crit`.
+/// # Note
+/// The function is recursive and may overflow the stack when run on large input functions.
+pub fn forward_slice(func: &Function, crit: &(Cow<'static,str>,usize)) -> Result<Vec<(Cow<'static,str>,usize)>> {
+    println!("forward_slice(): func={}, crit={:?}",func.uuid,crit);
+    let postorder = func.postorder();
+
+    /// \forall c <- a op b \in func : forward_slice(f,a) = [a] + forward_slice(f,c)
+    for vx in postorder {
+        match func.cflow_graph.vertex_label(vx) {
+            Some(&ControlFlowTarget::Resolved(ref bb)) => {
+                for mne in bb.mnemonics.iter() {
+                    for stmt in mne.instructions.iter() {
+                        let reads_crit = stmt.op.operands().iter().any(|op| {
+                            if let &&Rvalue::Variable{ ref name, subscript: Some(subscript),.. } = op {
+                                *name == crit.0 && subscript == crit.1
+                            } else {
+                                false
+                            }
+                        });
+
+                        if reads_crit {
+                            if let Lvalue::Variable{ ref name, subscript: Some(subscript),.. } = stmt.assignee {
+                                let mut ret = forward_slice(func,&(name.clone(),subscript))?;
+                                ret.push(crit.clone());
+                                return Ok(ret);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(&ControlFlowTarget::Unresolved(_)) | Some(&ControlFlowTarget::Failed(_,_)) | None => {}
+        }
+    }
+
+    Ok(vec![crit.clone()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +976,114 @@ mod tests {
                 unreachable!()
             }
         }
+    }
+
+    #[test]
+    fn slice() {
+        let a = Lvalue::Variable{ name: Cow::Borrowed("a"), size: 32, subscript: None };
+        let b = Lvalue::Variable{ name: Cow::Borrowed("b"), size: 32, subscript: None };
+        let c = Lvalue::Variable{ name: Cow::Borrowed("c"), size: 32, subscript: None };
+        let d = Lvalue::Variable{ name: Cow::Borrowed("d"), size: 32, subscript: None };
+        let y = Lvalue::Variable{ name: Cow::Borrowed("y"), size: 32, subscript: None };
+        let z = Lvalue::Variable{ name: Cow::Borrowed("z"), size: 32, subscript: None };
+        let i = Lvalue::Variable{ name: Cow::Borrowed("i"), size: 32, subscript: None };
+        let f = Lvalue::Variable{ name: Cow::Borrowed("f"), size: 1, subscript: None };
+
+        let mne0 = Mnemonic::new(0..1,"b0".to_string(),"".to_string(),vec![].iter(),vec![
+                                 Statement{ op: Operation::Move(Rvalue::new_u32(1)), assignee: i.clone() }].iter()).ok().unwrap();
+
+        let mne10 = Mnemonic::new(1..2,"b1.0".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: a.clone() }].iter()).ok().unwrap();
+        let mne11 = Mnemonic::new(2..3,"b1.1".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: c.clone() }].iter()).ok().unwrap();
+        let mne12 = Mnemonic::new(3..4,"b1.2".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::LessUnsigned(a.clone().into(),c.clone().into()), assignee: f.clone() }].iter()).ok().unwrap();
+
+        let mne20 = Mnemonic::new(4..5,"b2.0".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: b.clone() }].iter()).ok().unwrap();
+        let mne21 = Mnemonic::new(5..6,"b2.1".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: c.clone() }].iter()).ok().unwrap();
+        let mne22 = Mnemonic::new(6..7,"b2.2".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: d.clone() }].iter()).ok().unwrap();
+
+        let mne30 = Mnemonic::new(7..8,"b3.0".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Add(a.clone().into(),b.clone().into()), assignee: y.clone() }].iter()).ok().unwrap();
+        let mne31 = Mnemonic::new(8..9,"b3.1".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Add(c.clone().into(),d.clone().into()), assignee: z.clone() }].iter()).ok().unwrap();
+        let mne32 = Mnemonic::new(9..10,"b3.2".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Add(i.clone().into(),i.clone().into()), assignee: i.clone() }].iter()).ok().unwrap();
+        let mne33 = Mnemonic::new(10..11,"b3.3".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::LessOrEqualUnsigned(i.clone().into(),Rvalue::new_u32(100)), assignee: f.clone() }].iter()).ok().unwrap();
+
+        let mne4 = Mnemonic::new(11..12,"b4".to_string(),"".to_string(),vec![].iter(),vec![].iter()).ok().unwrap();
+
+        let mne50 = Mnemonic::new(12..13,"b5.0".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: a.clone() }].iter()).ok().unwrap();
+        let mne51 = Mnemonic::new(13..14,"b5.1".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::Move(Rvalue::Undefined), assignee: d.clone() }].iter()).ok().unwrap();
+        let mne52 = Mnemonic::new(14..15,"b5.2".to_string(),"".to_string(),vec![].iter(),vec![
+                                  Statement{ op: Operation::LessOrEqualUnsigned(a.clone().into(),d.clone().into()), assignee: f.clone() }].iter()).ok().unwrap();
+
+        let mne6 = Mnemonic::new(15..16,"b6".to_string(),"".to_string(),vec![].iter(),vec![
+                                 Statement{ op: Operation::Move(Rvalue::Undefined), assignee: d.clone() }].iter()).ok().unwrap();
+
+        let mne7 = Mnemonic::new(16..17,"b7".to_string(),"".to_string(),vec![].iter(),vec![
+                                 Statement{ op: Operation::Move(Rvalue::Undefined), assignee: b.clone() }].iter()).ok().unwrap();
+
+        let mne8 = Mnemonic::new(17..18,"b8".to_string(),"".to_string(),vec![].iter(),vec![
+                                 Statement{ op: Operation::Move(Rvalue::Undefined), assignee: c.clone() }].iter()).ok().unwrap();
+
+        let bb0 = BasicBlock::from_vec(vec![mne0]);
+        let bb1 = BasicBlock::from_vec(vec![mne10,mne11,mne12]);
+        let bb2 = BasicBlock::from_vec(vec![mne20,mne21,mne22]);
+        let bb3 = BasicBlock::from_vec(vec![mne30,mne31,mne32,mne33]);
+        let bb4 = BasicBlock::from_vec(vec![mne4]);
+        let bb5 = BasicBlock::from_vec(vec![mne50,mne51,mne52]);
+        let bb6 = BasicBlock::from_vec(vec![mne6]);
+        let bb7 = BasicBlock::from_vec(vec![mne7]);
+        let bb8 = BasicBlock::from_vec(vec![mne8]);
+        let mut cfg = ControlFlowGraph::new();
+
+        let v0 = cfg.add_vertex(ControlFlowTarget::Resolved(bb0));
+        let v1 = cfg.add_vertex(ControlFlowTarget::Resolved(bb1));
+        let v2 = cfg.add_vertex(ControlFlowTarget::Resolved(bb2));
+        let v3 = cfg.add_vertex(ControlFlowTarget::Resolved(bb3));
+        let v4 = cfg.add_vertex(ControlFlowTarget::Resolved(bb4));
+        let v5 = cfg.add_vertex(ControlFlowTarget::Resolved(bb5));
+        let v6 = cfg.add_vertex(ControlFlowTarget::Resolved(bb6));
+        let v7 = cfg.add_vertex(ControlFlowTarget::Resolved(bb7));
+        let v8 = cfg.add_vertex(ControlFlowTarget::Resolved(bb8));
+
+        cfg.add_edge(Guard::always(),v0,v1);
+
+        let g1 = Guard::from_flag(&f.clone().into()).ok().unwrap();
+        cfg.add_edge(g1.clone(),v1,v2);
+        cfg.add_edge(g1.negation(),v1,v5);
+
+        cfg.add_edge(Guard::always(),v2,v3);
+
+        let g3 = Guard::from_flag(&f.clone().into()).ok().unwrap();
+        cfg.add_edge(g3.clone(),v3,v1);
+        cfg.add_edge(g3.negation(),v3,v4);
+
+        let g5 = Guard::from_flag(&f.clone().into()).ok().unwrap();
+        cfg.add_edge(g5.clone(),v5,v6);
+        cfg.add_edge(g5.negation(),v5,v8);
+
+        cfg.add_edge(Guard::always(),v6,v7);
+        cfg.add_edge(Guard::always(),v7,v3);
+        cfg.add_edge(Guard::always(),v8,v7);
+
+        let mut func = Function::new("test".to_string(),"ram".to_string());
+
+        func.cflow_graph = cfg;
+        func.entry_point = Some(v0);
+
+        assert!(phi_functions(&mut func).is_ok());
+        assert!(rename_variables(&mut func).is_ok());
+
+        println!("{:?}",backward_slice(&func,&("z".into(),0)));
+        println!("{:?}",forward_slice(&func,&("a".into(),3)));
+        println!("{:?}",forward_slice(&func,&("b".into(),3)));
     }
 }
